@@ -1,0 +1,28 @@
+# Vitrine — runtime dependencies
+#
+# torch and gsplat must match your CUDA version. The index URL below targets
+# CUDA 13.0 builds — required for Blackwell (sm_120, e.g. RTX 5090) kernel
+# support in torch's own prebuilt ops; cu124-era wheels predate Blackwell.
+#
+# gsplat compiles CUDA kernels on first use and needs nvcc plus a host compiler
+# it accepts — see AGENTS.md, "The CUDA toolchain is fragile", and run
+# `python -m vitrine doctor` before anything else.
+
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch>=2.9
+gsplat>=1.5.0
+packaging>=23  # gsplat._backend imports this but its own metadata doesn't declare it
+
+# nvcc, supplied as wheels because there is no system CUDA toolkit on
+# Arch/CachyOS by default.
+nvidia-cuda-nvcc>=13.0
+nvidia-cuda-cccl>=13.0
+nvidia-cuda-crt>=13.0
+nvidia-nvvm>=13.0
+
+numpy>=1.26
+scipy>=1.13          # k-NN for initial Gaussian sizing
+pillow>=10.0         # image I/O, EXIF preservation
+pillow-heif>=0.16    # iPhone HEIC/HEIF stills
+plyfile>=1.0         # 3DGS PLY read/write
+opencv-python>=4.10  # sharpness scoring

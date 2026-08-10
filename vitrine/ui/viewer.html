@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Vitrine — Explore in 3D</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Source+Serif+4:opsz,wght@8..60,600&display=swap" rel="stylesheet"/>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      width: 100%;
+      background: #0a0a0c;
+      color: #f4f2ee;
+      font-family: "DM Sans", system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+    }
+    #root {
+      position: absolute;
+      inset: 0;
+    }
+    #root canvas {
+      display: block;
+      width: 100% !important;
+      height: 100% !important;
+    }
+    #hud {
+      position: fixed;
+      top: 14px;
+      left: 14px;
+      z-index: 20;
+      background: rgba(12, 12, 14, 0.88);
+      padding: 14px 16px;
+      border-radius: 12px;
+      max-width: min(360px, calc(100vw - 28px));
+      line-height: 1.45;
+      border: 1px solid #2c2c34;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+      pointer-events: none;
+    }
+    #hud a {
+      pointer-events: auto;
+      color: #8bb8f0;
+      text-decoration: none;
+    }
+    #hud a:hover { text-decoration: underline; }
+    #hud strong {
+      display: block;
+      font-family: "Source Serif 4", Georgia, serif;
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: #f0ebe3;
+      margin-bottom: 0.2rem;
+    }
+    #hud .muted {
+      color: #9a968c;
+      font-size: 0.86rem;
+    }
+    #hud .controls {
+      margin-top: 0.65rem;
+      padding-top: 0.6rem;
+      border-top: 1px solid #2c2c34;
+      color: #6e6a62;
+      font-size: 0.78rem;
+      line-height: 1.55;
+    }
+    #hud .controls b {
+      color: #9a968c;
+      font-weight: 600;
+    }
+    #err {
+      color: #f07171;
+      margin-top: 0.55rem;
+      white-space: pre-wrap;
+      font-size: 0.82rem;
+      line-height: 1.4;
+    }
+    #bar {
+      position: fixed;
+      left: 14px;
+      right: 14px;
+      bottom: 14px;
+      height: 5px;
+      background: #22222a;
+      border-radius: 999px;
+      overflow: hidden;
+      z-index: 20;
+      display: none;
+    }
+    #bar > i {
+      display: block;
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #ff6a00, #ff8a33);
+      transition: width 0.15s ease;
+      border-radius: 999px;
+    }
+    #status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: #ff8a33;
+      background: rgba(255, 106, 0, 0.14);
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      margin-bottom: 0.45rem;
+      letter-spacing: 0.02em;
+    }
+    #status-pill.ready {
+      color: #3ecf8e;
+      background: rgba(62, 207, 142, 0.14);
+    }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<div id="hud">
+  <div id="status-pill">Loading</div>
+  <strong id="title">Explore in 3D</strong>
+  <span class="muted" id="meta">Preparing the model…</span>
+  <div class="controls">
+    <div><b>Drag</b> to look around</div>
+    <div><b>Scroll</b> to move closer or farther</div>
+    <div><b>Right-drag</b> to pan sideways</div>
+  </div>
+  <div id="err"></div>
+</div>
+<div id="bar"><i id="bar-fill"></i></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+    "@mkkellogg/gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
+
+const run = decodeURIComponent(
+  location.pathname.replace(/^\/viewer\//, '').split('/').filter(Boolean)[0] || ''
+);
+// Absolute URL so the worker/fetch path is unambiguous inside iframes.
+const splatUrl = new URL(`/files/${encodeURIComponent(run)}/model/scene.splat`, location.origin).href;
+const plyUrl = new URL(`/files/${encodeURIComponent(run)}/model/scene.ply`, location.origin).href;
+
+function prettyName(name) {
+  return String(name || 'Archived space')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+const titleEl = document.getElementById('title');
+const meta = document.getElementById('meta');
+const errEl = document.getElementById('err');
+const bar = document.getElementById('bar');
+const barFill = document.getElementById('bar-fill');
+const statusPill = document.getElementById('status-pill');
+const root = document.getElementById('root');
+
+titleEl.textContent = prettyName(run);
+
+function setStatus(label, ready = false) {
+  statusPill.textContent = label;
+  statusPill.classList.toggle('ready', ready);
+}
+
+function setProgress(p) {
+  bar.style.display = 'block';
+  barFill.style.width = `${Math.max(0, Math.min(100, p * 100)).toFixed(1)}%`;
+  if (p >= 1) setTimeout(() => { bar.style.display = 'none'; }, 400);
+}
+
+function percentile(sorted, p) {
+  if (!sorted.length) return 0;
+  const i = (sorted.length - 1) * p;
+  const lo = Math.floor(i);
+  const hi = Math.ceil(i);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] * (hi - i) + sorted[hi] * (i - lo);
+}
+
+/** Robust scene centre + radius from a .splat ArrayBuffer (ignore outliers). */
+function frameFromSplat(buf) {
+  const u8 = new Uint8Array(buf);
+  const f32 = new Float32Array(buf);
+  const n = Math.floor(u8.length / 32);
+  if (n < 8) return null;
+
+  const step = Math.max(1, Math.floor(n / 80_000));
+  const xs = [];
+  const ys = [];
+  const zs = [];
+  for (let i = 0; i < n; i += step) {
+    const o = i * 8;
+    xs.push(f32[o]);
+    ys.push(f32[o + 1]);
+    zs.push(f32[o + 2]);
+  }
+  xs.sort((a, b) => a - b);
+  ys.sort((a, b) => a - b);
+  zs.sort((a, b) => a - b);
+  const x0 = percentile(xs, 0.05);
+  const x1 = percentile(xs, 0.95);
+  const y0 = percentile(ys, 0.05);
+  const y1 = percentile(ys, 0.95);
+  const z0 = percentile(zs, 0.05);
+  const z1 = percentile(zs, 0.95);
+  const cx = (x0 + x1) / 2;
+  const cy = (y0 + y1) / 2;
+  const cz = (z0 + z1) / 2;
+  const rx = (x1 - x0) / 2;
+  const ry = (y1 - y0) / 2;
+  const rz = (z1 - z0) / 2;
+  const radius = Math.max(rx, ry, rz, 0.5) * 1.15;
+  return { n, cx, cy, cz, radius, bytes: buf.byteLength };
+}
+
+async function tryGaussianViewer(frame, sceneUrl) {
+  const viewer = new GaussianSplats3D.Viewer({
+    rootElement: root,
+    cameraUp: [0, -1, 0],
+    initialCameraPosition: [
+      frame.cx,
+      frame.cy - frame.radius * 0.2,
+      frame.cz + frame.radius * 1.35,
+    ],
+    initialCameraLookAt: [frame.cx, frame.cy, frame.cz],
+    sharedMemoryForWorkers: false,
+    gpuAcceleratedSort: false,
+    integerBasedSort: false,
+    antialiased: true,
+    sphericalHarmonicsDegree: 0,
+  });
+
+  meta.textContent = 'Opening the three-dimensional model…';
+  setStatus('Opening model');
+  setProgress(0.75);
+  await viewer.addSplatScene(sceneUrl, {
+    format: GaussianSplats3D.SceneFormat.Splat,
+    splatAlphaRemovalThreshold: 1,
+    showLoadingUI: false,
+    progressiveLoad: false,
+    onProgress: (pct) => {
+      if (typeof pct === 'number') {
+        setProgress(0.75 + 0.24 * Math.min(1, pct / 100));
+        meta.textContent = `Opening the model… ${pct.toFixed?.(0) ?? pct}%`;
+      }
+    },
+  });
+  viewer.start();
+  setProgress(1);
+  setStatus('Ready to explore', true);
+  meta.textContent =
+    `${frame.n.toLocaleString()} detail elements · ${(frame.bytes / 2 ** 20).toFixed(1)} MB · full quality preview`;
+  return viewer;
+}
+
+async function pointCloudFallback(buf, frame) {
+  root.replaceChildren();
+
+  const u8 = new Uint8Array(buf);
+  const f32 = new Float32Array(buf);
+  const n = Math.floor(u8.length / 32);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0a0c);
+  const camera = new THREE.PerspectiveCamera(55, root.clientWidth / root.clientHeight, 0.05, 5000);
+  const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(root.clientWidth, root.clientHeight, false);
+  root.appendChild(renderer.domElement);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.target.set(frame.cx, frame.cy, frame.cz);
+  camera.position.set(frame.cx, frame.cy - frame.radius * 0.15, frame.cz + frame.radius * 1.4);
+  controls.update();
+
+  const maxPts = 800_000;
+  const step = Math.max(1, Math.ceil(n / maxPts));
+  const positions = [];
+  const colors = [];
+  const x0 = frame.cx - frame.radius * 1.4;
+  const x1 = frame.cx + frame.radius * 1.4;
+  const y0 = frame.cy - frame.radius * 1.4;
+  const y1 = frame.cy + frame.radius * 1.4;
+  const z0 = frame.cz - frame.radius * 1.4;
+  const z1 = frame.cz + frame.radius * 1.4;
+
+  for (let i = 0; i < n; i += step) {
+    const o = i * 8;
+    const x = f32[o];
+    const y = f32[o + 1];
+    const z = f32[o + 2];
+    if (x < x0 || x > x1 || y < y0 || y > y1 || z < z0 || z > z1) continue;
+    const b = i * 32 + 24;
+    const a = u8[b + 3];
+    if (a < 8) continue;
+    positions.push(x, y, z);
+    colors.push(u8[b] / 255, u8[b + 1] / 255, u8[b + 2] / 255);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const ptSize = Math.max(0.008, frame.radius * 0.0025);
+  const mat = new THREE.PointsMaterial({
+    size: ptSize,
+    vertexColors: true,
+    sizeAttenuation: true,
+  });
+  scene.add(new THREE.Points(geo, mat));
+
+  const onResize = () => {
+    const w = root.clientWidth || innerWidth;
+    const h = root.clientHeight || innerHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h, false);
+  };
+  addEventListener('resize', onResize);
+  const ro = new ResizeObserver(onResize);
+  ro.observe(root);
+  onResize();
+
+  (function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  })();
+
+  setStatus('Preview ready', true);
+  meta.textContent =
+    `Simplified preview · ${(positions.length / 3).toLocaleString()} points of ${n.toLocaleString()} · `
+    + `${(buf.byteLength / 2 ** 20).toFixed(1)} MB`;
+}
+
+async function main() {
+  setStatus('Downloading');
+  meta.textContent = 'Downloading the model…';
+  setProgress(0.02);
+
+  const res = await fetch(splatUrl, { cache: 'force-cache' });
+  if (!res.ok) {
+    throw new Error(`Could not load the model (HTTP ${res.status}).`);
+  }
+
+  const total = Number(res.headers.get('content-length') || 0);
+  let buf;
+  if (total > 0 && res.body) {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      setProgress(0.05 + 0.55 * (received / total));
+      meta.textContent =
+        `Downloading… ${(received / 2 ** 20).toFixed(1)} / ${(total / 2 ** 20).toFixed(1)} MB`;
+    }
+    buf = new Uint8Array(received);
+    let offset = 0;
+    for (const c of chunks) {
+      buf.set(c, offset);
+      offset += c.length;
+    }
+    buf = buf.buffer;
+  } else {
+    buf = await res.arrayBuffer();
+    setProgress(0.6);
+  }
+
+  const n = Math.floor(buf.byteLength / 32);
+  if (n < 1) throw new Error('The model file appears to be empty or unreadable.');
+
+  const frame = frameFromSplat(buf);
+  if (!frame) throw new Error('Could not frame the scene for viewing.');
+  meta.textContent = `Framing ${frame.n.toLocaleString()} detail elements…`;
+  setStatus('Preparing');
+
+  const blobUrl = URL.createObjectURL(
+    new Blob([buf], { type: 'application/octet-stream' })
+  );
+
+  try {
+    await tryGaussianViewer(frame, blobUrl);
+  } catch (gsErr) {
+    console.warn('GaussianSplats3D failed, using point-cloud fallback', gsErr);
+    errEl.textContent = '';
+    meta.textContent = 'Using a simplified point preview…';
+    await pointCloudFallback(buf, frame);
+    errEl.textContent =
+      'Note: the full-quality renderer was unavailable on this browser, so a simplified point preview is shown instead.';
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  setStatus('Could not load');
+  meta.textContent = 'The three-dimensional model could not be opened.';
+  errEl.textContent = String(err.message || err)
+    + `\n\nTried: ${splatUrl.replace(location.origin, '')}`
+    + `\nAlso available: ${plyUrl.replace(location.origin, '')}`;
+  bar.style.display = 'none';
+});
+</script>
+</body>
+</html>

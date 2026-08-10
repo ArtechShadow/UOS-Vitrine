@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="Vitrine">
+  <title>Vitrine</title>
+  <!-- Friendly camera-viewfinder mark: soft corners, warm focus, gaussian cluster -->
+  <defs>
+    <radialGradient id="warmGlow" cx="50%" cy="50%" r="42%">
+      <stop offset="0%" stop-color="#ff6a00" stop-opacity="0.28"/>
+      <stop offset="70%" stop-color="#ff6a00" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#ff6a00" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <circle cx="32" cy="32" r="18" fill="url(#warmGlow)"/>
+
+  <!-- rounded outer viewfinder corners -->
+  <g stroke="#f4f2ee" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 23 V12 H23"/>
+    <path d="M41 12 H52 V23"/>
+    <path d="M52 41 V52 H41"/>
+    <path d="M23 52 H12 V41"/>
+  </g>
+
+  <!-- soft inner frame -->
+  <rect x="20" y="20" width="24" height="24" rx="3.2" ry="3.2"
+        stroke="#f4f2ee" stroke-width="1.1" opacity="0.28"/>
+
+  <!-- warm focus ring (friendly, not military) -->
+  <circle cx="32" cy="32" r="7" stroke="#ff6a00" stroke-width="1.7"/>
+  <circle cx="32" cy="32" r="2.5" fill="#ff6a00"/>
+
+  <!-- organic gaussian / splat cluster -->
+  <g fill="#ff6a00">
+    <circle cx="26.5" cy="30.5" r="1.35" opacity="0.9"/>
+    <circle cx="29" cy="27.8" r="1.0" opacity="0.7"/>
+    <circle cx="35.5" cy="28.5" r="1.2" opacity="0.8"/>
+    <circle cx="38" cy="32" r="1.05" opacity="0.65"/>
+    <circle cx="36.2" cy="36.5" r="1.3" opacity="0.75"/>
+    <circle cx="30" cy="38" r="0.95" opacity="0.55"/>
+    <circle cx="27" cy="35" r="0.85" opacity="0.5"/>
+    <circle cx="33.5" cy="25.5" r="0.7" opacity="0.45"/>
+    <circle cx="39.5" cy="35.5" r="0.65" opacity="0.4"/>
+  </g>
+  <!-- tiny highlights -->
+  <g fill="#ffffff">
+    <circle cx="29.5" cy="31.5" r="0.45" opacity="0.55"/>
+    <circle cx="35" cy="33" r="0.4" opacity="0.45"/>
+    <circle cx="32.8" cy="29" r="0.35" opacity="0.4"/>
+  </g>
+</svg>

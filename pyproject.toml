@@ -1,0 +1,25 @@
+[project]
+name = "vitrine"
+version = "0.1.0"
+description = "Local, reproducible 3D Gaussian Splatting for digital preservation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# Dependencies are pinned in requirements.txt rather than here: torch and
+# gsplat need an extra index URL and a CUDA-matched build, which a plain
+# dependency list cannot express.
+
+[project.scripts]
+vitrine = "vitrine.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["vitrine"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

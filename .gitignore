@@ -1,0 +1,30 @@
+# Run outputs — regenerable from source/ and the pipeline.
+# Preservation packages are deposited elsewhere, not tracked here.
+runs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Raw capture data and reference benchmarks — personal/institutional
+# material, not code. Managed deliberately, not by git, regardless of format.
+source/
+reference/
+
+.directory
+.DS_Store
+
+# Scratch / build artifacts — regenerable, not part of the record.
+tmp/
+output/
+
+# Funding-bid, pitch, and cross-partner strategy material — internal only.
+docs/ai-cop-bid-v3.md
+docs/roadmap-ai-cop.md
+docs/bid-vs-delivery.md
+docs/vitrine-vs-dreamlab.md
+docs/ops-parallel-work.md
+docs/*.pptx
+docs/*.docx
