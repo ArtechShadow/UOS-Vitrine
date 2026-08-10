@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="branding/vitrine-viewfinder-wordmark.png" alt="Vitrine — digital preservation" width="420">
+  <img src="branding/vitrine-hero-banner.png" alt="Vitrine — digital preservation" width="560">
 </p>
 
 <p align="center">
@@ -190,6 +190,10 @@ python -m vitrine ui --open
 Opens `http://127.0.0.1:8765/` — stage status, PSNR/SSIM history, ingest
 samples, logs, and a splat viewer over everything in `runs/`.
 
+<p align="center">
+  <img src="branding/dashboard/hero.png" alt="Vitrine dashboard — nested-cinema-01 run, 25.72 dB / 0.817 SSIM, splat preview" width="820">
+</p>
+
 ### Checking a package later
 
 ```bash
@@ -228,31 +232,34 @@ and the final PSNR and SSIM against those unseen views are recorded in
 | [`docs/academic-report.md`](docs/academic-report.md) | Pointer to the full academic write-up and its build |
 | [`docs/5090-port-handoff.md`](docs/5090-port-handoff.md) | Porting the pipeline from Linux/RTX 3060 to Windows/RTX 5090 |
 
-## Related, separate projects
+## Related project — DreamLab Vitrine
 
-Same family name, different codebases and different licences — this
-repository does not depend on them and must not modify them, and they must
-not be merged into this one:
-
-| Project | What it is |
-|---|---|
-| Vitrine Capture | FastAPI + React capture front-end |
-| DreamLab Vitrine | A separate, GPL-licensed capture-adaptive stack — object segmentation, meshing, Unreal Engine 5.8 delivery |
+This pipeline is developed in collaboration with **DreamLab AI**, whose
+separate, GPL-licensed *Vitrine* lab stack ([DreamLab-AI/Vitrine](https://github.com/DreamLab-AI/Vitrine))
+handles object segmentation, meshing, and Unreal Engine 5.8 delivery. Same
+family name, different codebases and different licences — this repository
+does not depend on it and must not modify it, and it must not be merged into
+this one.
 
 This repository is the **preservation pipeline** — archival master and
 measured splat. Where the two systems meet, the intended seam is a file-based
 handoff (registered images, COLMAP poses, `scene.ply`, checksummed manifest),
 not a shared codebase.
 
+Also separate: **Vitrine Capture**, a FastAPI + React capture front-end.
+
 ## Acknowledgements
 
 Built at the **XR Lab, University of Salford**, for the preservation of
-*Nested Cinema — Vera's Not Alone* by Dr Pavel Prokopic, MediaCityUK.
+*Nested Cinema — Vera's Not Alone* by Dr Pavel Prokopic, MediaCityUK, in
+collaboration with **DreamLab AI**.
 
 <p align="left">
-  <img src="branding/partners/xr-lab.png" alt="XR Lab" height="48">
+  <img src="branding/acks-xr-lab.png" alt="XR Lab" height="54">
   &nbsp;&nbsp;
-  <img src="branding/partners/university-of-salford.png" alt="University of Salford" height="48">
+  <img src="branding/acks-university-of-salford.png" alt="University of Salford" height="54">
+  &nbsp;&nbsp;
+  <img src="branding/acks-dreamlab-ai.png" alt="DreamLab AI" height="54">
 </p>
 
 ## Licence
