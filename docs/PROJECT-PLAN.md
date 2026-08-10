@@ -198,3 +198,11 @@ profile.
   vs. an archival splat), but relevant to the deferred object/interactive
   path — closer to DreamLab's territory (object segmentation, engine
   delivery) than this repo's archival-splat scope.
+- **[LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio)** — a
+  native C++ application to train, inspect, edit, and export 3DGS scenes;
+  this is the trainer DreamLab Vitrine already vendors downstream of this
+  pipeline. Worth watching as a potential faster/more capable alternative to
+  the `gsplat`-based `train.py` — but it is **GPL-3.0**, and this package is
+  MIT, so it could only ever be integrated as a separate process (CLI/file
+  handoff), never imported or vendored directly. Same licence boundary noted
+  for the DreamLab integration generally.
