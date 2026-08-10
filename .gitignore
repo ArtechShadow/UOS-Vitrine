@@ -19,6 +19,7 @@ reference/
 # Scratch / build artifacts — regenerable, not part of the record.
 tmp/
 output/
+report/
 
 # Funding-bid, pitch, and cross-partner strategy material — internal only.
 docs/ai-cop-bid-v3.md
