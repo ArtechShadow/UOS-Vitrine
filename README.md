@@ -19,7 +19,10 @@
 Vitrine turns photographs and video of a physical space into a high-quality 3D
 Gaussian Splat, together with the sidecar material — original files, camera
 poses, software versions, checksums — that makes the result reproducible,
-verifiable, and intelligible years later.
+verifiable, and intelligible years later. Where the standard idea of a
+digital twin assumes a live sensor feed, Vitrine builds one for a space that
+won't stay standing long enough to have one: a measured, checksummed digital
+twin of a moment, not a live system.
 
 Built for the University of Salford's capture of **Nested Cinema** (*Vera's Not
 Alone*, Dr Pavel Prokopic, MediaCityUK) — a temporary immersive film

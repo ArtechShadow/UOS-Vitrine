@@ -176,3 +176,25 @@ Run against the real data throughout. No synthetic fixtures.
   a held frame, or mask them — and record the choice in the manifest, because
   it is an interpretive decision about what is being preserved.
 - **Mesh path** once Open3D is ruled in or out.
+
+---
+
+## Possible future directions
+
+Unvalidated ideas, not commitments — each would need the usual measure-first
+treatment (`AGENTS.md` working agreement #3) before touching a production
+profile.
+
+- **[QuerySplat](https://inspatio.github.io/querysplat/)** — a feed-forward,
+  pose-free 3D Gaussian Splatting method (dual-branch geometry/appearance
+  decoder, SOTA on DL3DV). Relevant because it could bypass or shortcut the
+  COLMAP SfM stage entirely for a draft-quality pass — worth a speed/quality
+  comparison against `sfm.py` + `train.py` on Nested Cinema before any
+  pipeline change.
+- **[LiteReality-Agent](https://litereality.github.io/Litereality-agent-site/)**
+  — converts iPhone LiDAR scans into editable, code-based scene programs
+  (`Room.py`) rather than raw meshes or splats, with an agentic refine loop.
+  Different technique and a different deliverable (interactive/editable scene
+  vs. an archival splat), but relevant to the deferred object/interactive
+  path — closer to DreamLab's territory (object segmentation, engine
+  delivery) than this repo's archival-splat scope.
