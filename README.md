@@ -229,7 +229,6 @@ and the final PSNR and SSIM against those unseen views are recorded in
 | [`docs/progress.md`](docs/progress.md) | Backward-looking record of what has actually landed |
 | [`docs/capture-sop.md`](docs/capture-sop.md) | How to shoot a room so it reconstructs well |
 | [`docs/preservation.md`](docs/preservation.md) | What the archive package contains and why |
-| [`docs/academic-report.md`](docs/academic-report.md) | Pointer to the full academic write-up and its build |
 | [`docs/5090-port-handoff.md`](docs/5090-port-handoff.md) | Porting the pipeline from Linux/RTX 3060 to Windows/RTX 5090 |
 
 ## Related project — DreamLab Vitrine
