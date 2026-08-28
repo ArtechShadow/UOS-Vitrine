@@ -111,6 +111,37 @@ def _git_revision(repo: Path) -> str:
     return "not a git repository"
 
 
+#: The per-object fields the manifest carries when an object sidecar has run.
+#: The sidecar owns their meaning (schema ``vitrine/object/1``); we project a
+#: stable subset so the preservation manifest stays self-describing without
+#: importing sidecar code.
+_OBJECT_KEYS = (
+    "object_id", "label", "mesh_path", "sha256", "transform",
+    "orientation_status", "coverage", "confidence",
+)
+
+
+def _load_object_records(objects_json: Path) -> list[dict[str, Any]] | None:
+    """Project ``objects.json`` into the manifest's ``objects`` list, or ``None``.
+
+    Returns ``None`` when no sidecar output is present, so the manifest key is
+    simply absent on a run that never produced objects.
+    """
+    if not objects_json.is_file():
+        return None
+    try:
+        doc = json.loads(objects_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("objects.json present but unreadable at %s", objects_json)
+        return None
+    records = doc.get("objects", []) if isinstance(doc, dict) else []
+    return [
+        {key: rec.get(key) for key in _OBJECT_KEYS}
+        for rec in records
+        if isinstance(rec, dict)
+    ]
+
+
 def _copy_tree(src: Path, dest: Path, *, description: str) -> int:
     if not src.exists():
         logger.warning("skipping %s — %s not found", description, src)
@@ -211,9 +242,18 @@ def build_package(
     ingest_report: dict[str, Any] | None = None,
     sfm_report: dict[str, Any] | None = None,
     profile: dict[str, Any] | None = None,
+    objects_dir: Path | None = None,
     project_root: Path | None = None,
 ) -> PackageResult:
-    """Assemble the package and write ``manifest.json`` plus ``README.md``."""
+    """Assemble the package and write ``manifest.json`` plus ``README.md``.
+
+    When ``objects_dir`` holds an object sidecar's output (an ``objects.json``
+    plus per-object assets), its tree is archived under
+    ``derivatives/objects/`` and its records are surfaced as an optional
+    top-level ``objects`` key. The schema stays
+    ``vitrine/preservation-package/1`` — the key is additive and absent on runs
+    that produced no objects, so existing packages and readers are unaffected.
+    """
     output_root = Path(output_root)
     if output_root.exists():
         shutil.rmtree(output_root)
@@ -233,6 +273,15 @@ def build_package(
         _copy_tree(Path(d), output_root / "derivatives", description="derivative")
         for d in (derivatives or [])
     )
+
+    # Object sidecar output, if any, is archived under derivatives/objects/ so
+    # its assets are checksummed with everything else.
+    object_records: list[dict[str, Any]] | None = None
+    if objects_dir is not None and Path(objects_dir).is_dir():
+        counts["objects"] = _copy_tree(
+            Path(objects_dir), output_root / "derivatives" / "objects", description="objects"
+        )
+        object_records = _load_object_records(Path(objects_dir) / "objects.json")
 
     # Checksum everything now in place.
     files: list[dict[str, Any]] = []
@@ -269,6 +318,9 @@ def build_package(
         "total_bytes": total_bytes,
         "files": files,
     }
+    if object_records is not None:
+        manifest["objects"] = object_records
+
     manifest_path = output_root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
