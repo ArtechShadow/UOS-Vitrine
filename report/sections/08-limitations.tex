@@ -10,10 +10,14 @@ constrains future claims and keeps throughput capability distinct from reconstru
 On the object side, carve over-merges where one class tiles the scene. On the gallery golden set,
 per-label mask unions collapse wall-to-wall paintings into a few multi-million-Gaussian blobs that
 overlap one ground-truth object; individual instances are recovered only as smaller, sometimes
-fragmentary components. The fix is per-instance masks fed to carve separately, not per-label unions. The same fault has a scale consequence on nc04: the pass-2 radio subset spans roughly
-$15.8\times3.1\times10.7$ units against a scene scale of 9.2, i.e. it swallows wall and floor, so the
-carve centroid and extent are contaminated and object-to-scene placement stays approximate until the
-carve is cleaned.
+fragmentary components. The fix is per-instance masks fed to carve separately, not per-label unions. % SRC: runs/nc04-object-pass2/objects/radio_00.ply raw extent vs summary.json scene_scale=9.2
+ The same fault has a stark scale consequence on nc04. Measured directly, the recovered radio
+Gaussian subset (118{,}070 splats) spans $120.9\times44.1\times125.1$ units in a scene of scale 9.2
+--- roughly $13\times$ the whole scene, i.e. the per-object carve leaked the entire room into the
+object. The manifest's robust p5--p95 extent field ($15.8\times3.1\times10.7$) understates this; the
+radio's true core is about 1.5 units (inter-quartile). This upstream carve/mask-sparsity leak, not
+any generation or placement defect, is what caps silhouette-refined placement until the carve is
+cleaned.
 Orientation remains the weakest emplacement axis: placement solves translation and scale from the
 carve subset reliably, but full orientation must be recovered from silhouettes and is marked
 \texttt{needs\_review} when under-constrained --- low-confidence placements must not be presented as
@@ -22,9 +26,8 @@ validated assets, and generated backsides and occluded surfaces are labelled inf
 Further limits, stated plainly: a splat interpolates views, it does not measure surfaces, and COLMAP recovers
 arbitrary scale unless an external measurement establishes world units. Mirrors, screens, glass and
 polished metal are represented by observed pixels, not physical optics; moving screens are
-constitutive to the artwork and a static splat cannot preserve their temporal sequence. The live nc04
-pass leaves Camera~5's 4K walkthrough (120 frames) unused because only the \texttt{.MOV} shipped ---
-the densest trajectory is currently absent. GroundingDINO phrase-merging pollutes labels
+constitutive to the artwork and a static splat cannot preserve their temporal sequence. Pass~1 left Camera~5's 4K walkthrough (120 frames) unused because only the \texttt{.MOV} shipped;
+pass~2 extracted and used all 120, adding the densest trajectory. GroundingDINO phrase-merging pollutes labels
 (``armchair chair'', ``radio typewriter''); it is cosmetic for carve but needs one prompt per detect
 call. And the reproj-IoU metric is a lower bound until a real gsplat rasteriser replaces the coarse
 point-splat silhouette.

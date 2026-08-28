@@ -23,6 +23,7 @@ solved as two camera models. Source: UoS Vitrine repository (G. Watts).}
 
 
 \subsection{Laptop and workstation measurements}
+% SRC: recovered-report/report.md §5.1 (laptop) + §5.3 (5090 control)
 On the target laptop (RTX 3060 Laptop, \SI{6}{\giga\byte}) the validated run staged 222 images,
 registered all of them, and recovered two camera models and 111{,}203 sparse points. Training
 completed 15{,}000 iterations in \SI{60.4}{\minute}, ending at one million Gaussians with
@@ -117,8 +118,8 @@ A matched-view diagnostic on held-out still \texttt{IMG\_6351} (Figure~\ref{fig:
 sofa fabric, newspaper print and equipment detail that stay sharp in the source. The detail
 exists in the stills but does not survive reconstruction; the indicated next test is a
 stills-only baseline before reintroducing only the video frames that close a genuine coverage
-gap. The 5090 control is the honest working workstation result: it reproduces laptop quality
-about 25 times faster but does not yet exceed it.
+gap. The 5090 control is the working workstation result: it reproduces laptop quality about 25 times
+faster but does not yet exceed it.
 
 \begin{figure*}[t]
 \centering

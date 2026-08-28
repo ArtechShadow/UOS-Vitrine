@@ -12,7 +12,7 @@ intrinsics (because UoS never persists undistorted images), replicating \texttt{
 maths under golden tests that require pixel-identical rectification for the same camera. Every
 artefact records which pixel domain (distorted or rectified) it lives in.
 
-\textbf{Carve} is the load-bearing correctness fix. A 2D mask votes for 3D Gaussians only
+\textbf{Carve} is the stage where correctness matters most. A 2D mask votes for 3D Gaussians only
 through per-pixel front-depth-band gating (foreground / background / \emph{abstain}), with
 min-view thresholds, 3D connected-component cleanup and robust p5--p95 extents. The naive
 all-along-ray voting of the earlier DreamLab \texttt{mask\_projector} was rejected in adversarial

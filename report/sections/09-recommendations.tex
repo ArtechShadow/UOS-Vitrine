@@ -10,12 +10,12 @@ stills-only 5090 baseline from the 72 archival masters before requesting any res
 formal newspaper-legibility and matched-view Luma comparisons using saved cameras rather than a single
 subjective orbit.
 
-\textbf{Object pipeline.} The biggest available fix is per-instance masks: feed each detection box's SAM
-mask into carve separately so tiling classes do not collapse into one blob. Add a real gsplat
-rasteriser for silhouette, PSNR and SSIM to sharpen the observed/withheld gap. Complete the lane
-bake-off once Lane~B's environment is stood up via the \texttt{uv} py3.10 route, and resolve the
-Stable-X checkpoint licence before any commercial Lane~B ship. Extract Camera~5's walkthrough frames to
-add the densest trajectory, and normalise GroundingDINO prompts to one per detect call.
+\textbf{Object pipeline.} The highest-priority fix is de-contaminating the carve so a per-object subset
+no longer swallows wall and floor; feeding each detection box's SAM mask into carve separately keeps
+tiling classes from collapsing into one blob. Add a real gsplat
+rasteriser for silhouette, PSNR and SSIM to sharpen the observed/withheld gap. Reproduce Lane~B's pinned environment on a clean machine via the \texttt{uv} py3.10 route and resolve
+the Stable-X checkpoint licence before any commercial Lane~B ship. Normalise GroundingDINO prompts to
+one per detect call.
 
 \textbf{Integration and handover.} Land the minimal additive UoS PR (\S6), including the
 Windows$\rightarrow$POSIX path normalisation in the packager/verify. Seal the preferred scene package
@@ -25,6 +25,6 @@ selections, reconstructed assets and placements, and disable cloud fallbacks for
 The two repositories stay separate in code, licence, product identity and preservation responsibility;
 the file contract is the boundary that keeps them so.
 
-Both UoS PRs are open (sidecar hook \#1, composed-scene field \#2). The remaining gates are the
-Windows/5090 acceptance run, the refined-scoring lane winner regenerated at ship quality, PR review
-and merge, and the sealed-package hashes. \todo{Tick these off at final handover.}
+Both UoS PRs are open (sidecar hook \#1, composed-scene field \#2). Open at closeout: the Windows/5090
+acceptance run, the refined-scoring lane winner regenerated at ship quality, PR review and merge, and
+the sealed-package hashes.
