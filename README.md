@@ -1,100 +1,250 @@
 <p align="center">
-  <img src="branding/vitrine-hero-banner.png" alt="Vitrine — digital preservation" width="560">
+  <img src="branding/vitrine-hero-banner.png" alt="Vitrine — local 3D digital preservation" width="700">
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-orange.svg"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue.svg">
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg">
-  <img alt="GPU" src="https://img.shields.io/badge/GPU-6GB%20laptop%20→%20RTX%205090-76b900.svg">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg">
+  <img alt="GPU" src="https://img.shields.io/badge/NVIDIA-RTX%203060%20Laptop%20%E2%86%92%20RTX%205090-76b900.svg">
+  <img alt="Status" src="https://img.shields.io/badge/status-active%20research-f07d1c.svg">
+</p>
+
+<h1 align="center">Vitrine</h1>
+
+<p align="center">
+  <strong>A local, GUI-driven platform for scene reconstruction, object segmentation and reproducible 3D digital preservation.</strong>
 </p>
 
 <p align="center">
-  Local, reproducible <b>3D Gaussian Splatting for digital preservation</b>.<br>
-  No cloud services. No paid software. One CLI, one codebase, laptop to workstation.
+  Turn photographs and video into a measurable 3D reconstruction while preserving the originals, camera poses, processing history, quality metrics and checksums needed to reproduce it.
+</p>
+
+<p align="center">
+  No cloud processing · No paid reconstruction service · One pipeline from laptop to workstation
 </p>
 
 ---
 
-Vitrine turns photographs and video of a physical space into a high-quality 3D
-Gaussian Splat, together with the sidecar material — original files, camera
-poses, software versions, checksums — that makes the result reproducible,
-verifiable, and intelligible years later. Where the standard idea of a
-digital twin assumes a live sensor feed, Vitrine builds one for a space that
-won't stay standing long enough to have one: a measured, checksummed digital
-twin of a moment, not a live system.
+## What is Vitrine?
 
-Built for the University of Salford's capture of **Nested Cinema** (*Vera's Not
-Alone*, Dr Pavel Prokopic, MediaCityUK) — a temporary immersive film
-installation that, once de-installed, exists only as documentation.
+Vitrine is an open-source, local-first pipeline for preserving physical spaces,
+exhibitions and temporary installations as reproducible 3D records.
 
-## Why this exists
+It combines two connected workflows:
 
-Cloud splat services are convenient but they are a black box: you cannot audit
-what they did, you cannot re-run them in ten years, and you cannot deposit
-their internals in an archive. For preservation that is disqualifying.
+1. **Scene reconstruction** — photographs and video are processed into a
+   measured 3D Gaussian Splat of the complete environment.
+2. **Object reconstruction** — an optional external sidecar can identify and
+   segment objects, reconstruct them as individual 3D assets and place them
+   back into a composed scene.
 
-The other half is quality. A splat trained the naive way looks acceptable in
-motion and falls apart the moment you need to *read* something in it — which,
-for an installation whose walls are papered with newspaper clippings, is the
-entire point.
+The visual model is not treated as the complete result. A Vitrine archive can
+also contain original capture media, calibrated camera positions, COLMAP
+evidence, software versions, held-out quality measurements, reconstructed
+object meshes, provenance records and SHA-256 checksums.
 
-Every design decision here is backed by a measurement, not a guess — see
-[`AGENTS.md`](AGENTS.md) and [`docs/`](docs/) for the full record, including
-the negative results.
+The result is a **digital twin of a moment**: not a live sensor system, but a
+reproducible record of a space that may later change or disappear.
+
+## Designed for ease of use
+
+Vitrine includes a local graphical interface so routine captures do not need
+to be managed entirely from the command line.
+
+```bash
+python -m vitrine ui --open
+```
+
+The interface opens at `http://127.0.0.1:8765/` and provides a visual workspace
+for:
+
+- creating a reconstruction from local photographs and video;
+- choosing a suitable quality profile;
+- following processing progress and logs;
+- browsing completed and in-progress captures;
+- reviewing reconstruction statistics and quality measurements;
+- exploring Gaussian Splats in an interactive viewer;
+- viewing object summaries and links to reconstructed assets or composed scenes
+  when sidecar output is present;
+- inspecting archive contents and preservation metadata.
+
+All processing remains on the local computer. The GUI is a user-friendly layer
+over the same reproducible pipeline; the CLI remains available for research,
+automation and stage-by-stage control.
+
+| Create from photographs or video | Inspect the archive beside the live viewer |
+|---|---|
+| ![Vitrine Create a splat screen with local image and video upload](docs/images/vitrine-create-splat.png) | ![Vitrine archive workspace with run information and interactive viewer](docs/images/vitrine-archive-workspace.png) |
+
+![Full-screen interactive Gaussian splat viewer showing the Nested Cinema installation](docs/images/vitrine-interactive-viewer.png)
+
+## Built for temporary cultural spaces
+
+Vitrine was developed at the **XR Lab, University of Salford**, initially to
+preserve **Nested Cinema — *Vera's Not Alone*** by Dr Pavel Prokopic at
+MediaCityUK.
+
+The installation combined physical scenery, newspaper-clad structures,
+screens and immersive film. Once dismantled, its spatial experience could no
+longer be revisited through ordinary photographs alone. This made it an ideal
+test case for a larger question:
+
+> How can an experimental 3D reconstruction become a trustworthy and reusable preservation record?
+
+## Key capabilities
+
+| Capability | What it provides |
+|---|---|
+| Accessible local GUI | Create, monitor, inspect and manage reconstructions visually |
+| Local scene reconstruction | Produces a Gaussian Splat without uploading the capture to a cloud service |
+| Photographs and video | Combines detailed stills with continuous video coverage |
+| Multi-camera calibration | Keeps phones, lenses, resolutions and video sources correctly separated |
+| Lens correction | Corrects COLMAP camera distortion before splat training |
+| Measured quality | Evaluates unseen views using PSNR and SSIM |
+| Object identification and segmentation | Connects to an optional GroundingDINO and SAM3.1 sidecar |
+| Per-object reconstruction | Produces individual object candidates and GLB assets |
+| Scene composition | Places recovered objects into an exportable glTF scene |
+| Provenance tracking | Distinguishes photographed evidence from inferred or generated surfaces |
+| Preservation packaging | Stores originals, poses, models, metadata, derivatives and checksums |
+| Laptop-to-workstation profiles | Runs from a 6 GB RTX 3060 Laptop to an RTX 5090 workstation |
 
 ## How it works
 
 ```mermaid
-flowchart LR
-    A["source/<br/>stills + video,<br/>one folder per camera"] --> B["ingest<br/>sharpness selection,<br/>even coverage"]
-    B --> C["sfm<br/>COLMAP · multi-camera<br/>aware pose solve"]
-    C --> D["train<br/>gsplat MCMC ·<br/>SSIM loss · random crops"]
-    D --> E["evaluate<br/>held-out PSNR / SSIM<br/>per camera group"]
-    D --> F["export<br/>scene.ply → scene.splat"]
-    D --> G["mesh<br/>depth fusion → glTF"]
-    F --> H["package<br/>checksummed manifest,<br/>preservation archive"]
-    G --> H
-
-    classDef stage fill:#fff3e8,stroke:#f07d1c,color:#222;
-    class B,C,D,E,F,G,H stage;
+flowchart TD
+    A["Photographs and video"] --> B["Ingest and camera grouping"]
+    B --> C["COLMAP pose reconstruction"]
+    C --> D["Gaussian Splat training"]
+    D --> E["Evaluation and scene export"]
+    E --> F["Optional object sidecar"]
+    F --> G["Segmentation and 3D reconstruction"]
+    G --> H["Object placement and composed scene"]
+    E --> I["Preservation package"]
+    H --> I
 ```
 
-Every stage is reachable through one CLI:
+Each expensive stage writes a compact report and can be repeated independently.
+The complete scene pipeline is also reachable through one command:
 
 ```bash
-python -m vitrine doctor      # checks the machine can run the pipeline
-python -m vitrine profiles    # shows the hardware-profile table
+python -m vitrine doctor
+python -m vitrine profiles
 python -m vitrine run --run-dir runs/my-capture --quality standard
-python -m vitrine ui --open   # local dashboard over runs/
+python -m vitrine ui --open
 ```
 
-## What was found along the way
+## Quick start
 
-The headline result isn't the splat — it's the diagnostic trail. A long-running
-quality bug ("large training crops cause the model to collapse") turned out to
-have nothing to do with crop size:
+Requires Python 3.11+, an NVIDIA GPU, `ffmpeg`, and Docker. COLMAP runs in a
+container on both supported platforms.
 
-| | as shot | undistorted |
-|---|---:|---:|
-| PSNR, held out | 14.18 dB | **19.11 dB** |
-| SSIM | 0.534 | **0.689** |
-| Live Gaussians | 6.3% | **42.6%** |
+```bash
+git clone https://github.com/ArtechShadow/UOS-Vitrine.git
+cd UOS-Vitrine
 
-Every camera COLMAP solves for this capture comes back with real lens
-distortion — `gsplat`'s rasteriser assumes a pinhole camera, and nothing had
-ever corrected for it. Distortion error grows with distance from the image
-centre, so *larger* crops of *larger* source images reached further into the
-uncorrected corners — which is exactly what made crop size look like the
-cause. Fixing the actual bug reversed the conclusion: bigger crops help, once
-the lens is accounted for. Full write-up: [`docs/undistortion-finding.md`](docs/undistortion-finding.md).
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 
-That was the largest of six measured findings that took the best full-capture
-reconstruction from 19.8 dB to **22.9 dB / 0.778 SSIM** on a 736-view,
-five-camera capture spanning three phones, a Polycam session, and a 4K
-walkthrough. Full record: [`docs/nested-cinema-04-master.md`](docs/nested-cinema-04-master.md).
+docker pull colmap/colmap:latest
+python -m vitrine doctor
+python -m vitrine ui --open
+```
 
-## Measured results
+Validated on Linux with an RTX 3060 Laptop GPU and Windows 11 with an RTX 5090.
+The reconstruction algorithm remains the same; hardware profiles change the
+measured resolution, crop, Gaussian cap and iteration settings.
+
+## Capturing and reconstructing a scene
+
+Place source media into separate folders for each camera group. This separation
+is functional, not cosmetic: mixing a high-resolution still and a video frame
+under one set of camera intrinsics can silently warp the reconstruction.
+
+```text
+source/
+├── stills/     photographs — the preservation master
+└── video/      walkthrough — fills gaps between stills
+```
+
+Run the complete scene workflow:
+
+```bash
+python -m vitrine run \
+    --run-dir runs/my-capture \
+    --quality standard \
+    --title "My Installation" \
+    --subject "What was captured and why it matters."
+```
+
+Or work stage by stage:
+
+```bash
+python -m vitrine --run-dir runs/my-capture ingest
+python -m vitrine --run-dir runs/my-capture sfm
+python -m vitrine --run-dir runs/my-capture train
+python -m vitrine --run-dir runs/my-capture evaluate
+python -m vitrine --run-dir runs/my-capture package --title "..." --subject "..."
+```
+
+Always make a `draft` while the subject still exists. It answers the most
+important early question — whether the capture has enough overlap to register —
+before a temporary installation is dismantled.
+
+## Object segmentation and reconstruction
+
+Object processing is optional and deliberately separated from the core
+MIT-licensed environment. Vitrine invokes an external reconstruction sidecar
+as a subprocess, keeping its heavyweight dependencies and model licences out
+of this repository.
+
+```bash
+python -m vitrine --run-dir runs/my-capture objects \
+    --sidecar /path/to/object-sidecar
+```
+
+The sidecar consumes a Vitrine run read-only and can:
+
+- identify candidate objects with GroundingDINO prompts;
+- segment them per frame with SAM3.1;
+- rectify masks and images into an explicitly recorded camera domain;
+- carve coherent 3D object candidates using front-depth-band gating and
+  multi-view evidence;
+- choose photographic seed views by silhouette, sharpness and coverage;
+- generate alternative object reconstructions;
+- score candidates against real photographs, masks and recovered cameras;
+- estimate position, orientation and scale within the scene;
+- bake photographed detail onto observed texture regions;
+- record generated filling separately for surfaces that were never observed;
+- emit individual GLB assets and an optional composed glTF scene.
+
+The research harness has evaluated reconstruction lanes including
+**TRELLIS.2** and **ReconViaGen**. Current rankings are evidence for the tested
+Nested Cinema objects, not claims of universal model superiority.
+
+### A secure file boundary
+
+The sidecar writes a versioned contract rather than importing code into the
+preservation pipeline:
+
+```text
+runs/<name>/objects/
+├── objects.json             schema: vitrine/object/1
+├── object meshes and previews
+└── optional composed scene
+```
+
+Before accepting output, Vitrine validates the schema, safe relative paths,
+mesh references, transforms, coverage and confidence values. Checksums are
+recomputed rather than trusted, and symlinks, traversal paths, duplicate IDs
+and malformed records are rejected.
+
+Validated assets are archived under `derivatives/objects/`. The preservation
+manifest records stable per-object metadata and labels the composed scene as a
+derivative that may combine observed and generated content.
+
+## Measured scene results
 
 | Run | Hardware | Views | PSNR | SSIM | Time |
 |---|---|---:|---:|---:|---:|
@@ -102,173 +252,139 @@ walkthrough. Full record: [`docs/nested-cinema-04-master.md`](docs/nested-cinema
 | `nested-cinema-01-5090-control` | RTX 5090 | 222 | 25.06 dB | 0.821 | **2.4 min** (~25×) |
 | `nested-cinema-04-master` | RTX 5090 | 736 | 22.91 dB | 0.778 | 8.7 min |
 
-The 5090 control reproduces the laptop recipe's exact quality at a fraction of
-the time. `04-master` is not a regression from the 25.72 dB baseline — it is
-scored against a much larger and harder held-out set (three camera types
-instead of one, including low-resolution and motion-blurred frames). See the
-doc above for why these numbers aren't directly comparable.
+The 5090 control reproduces the laptop recipe at approximately the same quality
+in a fraction of the time. The larger `nested-cinema-04-master` result is scored
+against a broader and more difficult held-out set spanning five camera groups,
+so its figures are not directly comparable with the 222-view baseline.
+
+Quality is measured rather than asserted: every eighth view is held out of
+training, and PSNR and SSIM are recorded against photographs the optimiser did
+not see.
+
+## Research findings
+
+### Lens distortion was the largest quality fault
+
+COLMAP recovered real radial distortion for every camera, while the gsplat
+rasteriser assumed an ideal pinhole model. Correcting images and intrinsics
+before training improved the matched 736-view experiment by **4.93 dB PSNR**,
+**0.155 SSIM**, and raised live Gaussians from **6.3% to 42.6%**.
+
+This also explained why large crops had appeared harmful: they reached further
+into the uncorrected image corners. Full record:
+[`docs/undistortion-finding.md`](docs/undistortion-finding.md).
+
+### Frame coverage controls training health
+
+A random crop must revisit enough of each frame for reconstruction gradients to
+counter global opacity and scale regularisation. In the measured tests, crop
+coverage below approximately 50% collapsed the live Gaussian population.
+
+The validated high-quality recipe uses a 2304-pixel source with a 1536-pixel
+crop (67% coverage). Full record:
+[`docs/nested-cinema-04-master.md`](docs/nested-cinema-04-master.md).
+
+### Object carving needs depth-aware evidence
+
+Naively voting for every Gaussian along a masked camera ray contaminates an
+object with occluded geometry behind it. The current sidecar contract uses a
+front-depth band, multi-view thresholds and connected-component cleanup. The
+latest Nested Cinema radio test reduced the carve to a clean 2,093-Gaussian
+cluster after correcting an outlier-inflated depth band.
 
 ## Quality profiles
 
 ```bash
-python -m vitrine profiles   # show the table and the detected tier
+python -m vitrine profiles
 ```
 
 | | draft | standard | archive |
 |---|---|---|---|
-| purpose | did the capture work? | good result | deposit quality |
-| laptop (6 GB) | ~3 min | ~40 min | ~110 min |
-| workstation (24–32 GB) | ~3 min | ~60 min | ~275 min (est.) |
+| Purpose | Check capture registration | Reliable working result | Deposit-oriented testing |
+| Laptop, 6 GB | ~3 min | ~40 min | ~110 min |
+| Workstation, 24–32 GB | ~3 min | ~60 min | ~275 min estimated |
 
-Always shoot a `draft` first — it answers the only question that matters
-early, whether the capture has enough overlap to register at all, in minutes
-rather than hours.
+> **Known gap:** the workstation `archive` preset (`crop=1600`,
+> `source_long_edge=4096`) remains unvalidated and can suffer opacity collapse.
+> Use `standard`, or reproduce the best measured high-quality result with
+> [`scripts/run_nested_cinema_04_master.py`](scripts/run_nested_cinema_04_master.py),
+> until the profile is revalidated.
 
-> **Known gap:** the workstation `archive` preset (`crop=1600` /
-> `source_long_edge=4096`) predates the frame-coverage finding above and is
-> **not yet revalidated** — it can collapse the same way the crop investigation
-> did before the real cause was found. `standard` is solid on both tiers today;
-> reproduce the best measured workstation result with
-> [`scripts/run_nested_cinema_04_master.py`](scripts/run_nested_cinema_04_master.py)
-> until the profile itself is corrected. Working agreement in `AGENTS.md`:
-> unvalidated numbers get measured or reverted, never shipped quietly.
+## What comes out
 
-## Install
-
-Requires Python 3.11+, an NVIDIA GPU, `ffmpeg`, and Docker (COLMAP runs in a
-container on both platforms).
-
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-docker pull colmap/colmap:latest   # ~9 GB
-python -m vitrine doctor           # catches a missing CUDA host compiler
-                                    # or broken Docker GPU passthrough early
+```text
+runs/<name>/
+├── ingest/      staged frames and selection report
+├── sfm/         COLMAP database, camera poses and sparse reconstruction
+├── model/       full-SH scene.ply and measured results
+├── objects/     optional sidecar manifest and per-object assets
+└── archive/     checksummed preservation package
 ```
 
-Validated on Linux (RTX 3060 Laptop) and Windows 11 (RTX 5090, Blackwell). The
-same algorithm runs on both — only the numbers in `vitrine/profiles.py` change
-between tiers.
+The archive can contain:
 
-## Use
-
-Put source media in `source/`, one subfolder per camera — the subfolder split
-is not cosmetic, each becomes its own COLMAP camera model, and mixing a 25 MP
-phone still with a 720p video frame under one set of intrinsics silently warps
-the reconstruction rather than erroring:
-
-```
-source/
-├── stills/     photographs — the preservation master
-└── video/      walkthrough — fills the gaps between stills
+```text
+archive/
+├── originals/             untouched source photographs and video
+├── sfm/                   camera poses and sparse cloud in plain text
+├── model/                 full spherical-harmonic Gaussian Splat
+├── derivatives/
+│   ├── web access copies and conventional geometry
+│   └── objects/           validated object meshes and composed scene
+├── manifest.json          versions, parameters, metrics and SHA-256 inventory
+└── README.md              plain-language preservation record
 ```
 
-Then either run the whole thing:
-
-```bash
-python -m vitrine run \
-    --run-dir runs/my-capture \
-    --quality archive \
-    --title "My Installation" \
-    --subject "What was captured, in a sentence or two."
-```
-
-or a stage at a time, which is what you want while iterating:
-
-```bash
-python -m vitrine --run-dir runs/my-capture ingest
-python -m vitrine --run-dir runs/my-capture sfm
-python -m vitrine --run-dir runs/my-capture train
-python -m vitrine --run-dir runs/my-capture package --title "..." --subject "..."
-```
-
-### Local dashboard
-
-```bash
-python -m vitrine ui --open
-```
-
-Opens `http://127.0.0.1:8765/`. The **Create a splat** screen accepts local
-photographs and video, starts the existing ingest → COLMAP → training →
-packaging pipeline, and keeps the capture on the workstation. Standard quality
-is the safe default; progress appears in the Library while the build runs.
-
-| Create from photographs or video | Inspect the archive beside the live viewer |
-|---|---|
-| ![Vitrine Create a splat screen with local image and video upload](docs/images/vitrine-create-splat.png) | ![Vitrine three-column archive workspace with menu, run information and interactive viewer](docs/images/vitrine-archive-workspace.png) |
-
-The archive workspace keeps the menu, measured run information, and viewer in
-separate columns. Open the viewer full-screen to walk through the splat.
-
-![Full-screen interactive Gaussian splat viewer showing the Nested Cinema installation](docs/images/vitrine-interactive-viewer.png)
-
-### Checking a package later
+Verify a package later with:
 
 ```bash
 python -m vitrine verify runs/my-capture/archive
 ```
 
-Re-hashes every file against the manifest. The package also carries a
-standalone copy of this check in its own `README.md`, so it stays verifiable
-even if this tool is long gone.
+Checksums detect change or corruption; they complement rather than replace a
+real backup and preservation policy.
 
-## What comes out
+## Honest limitations
 
-```
-runs/<name>/
-├── ingest/     staged frames, one folder per camera + a selection report
-├── sfm/        COLMAP database and the sparse model as plain text
-├── model/      scene.ply (full spherical harmonics) + metrics
-└── archive/    the preservation package — see docs/preservation.md
-```
+- A Gaussian Splat is an interpolation, not a direct geometric measurement.
+- Surfaces that were never photographed must be inferred.
+- Reflective, transparent and moving materials remain difficult.
+- Object reconstructions can contain generated geometry or texture on unseen
+  surfaces; Vitrine records that distinction rather than hiding it.
+- COLMAP scale is arbitrary unless the capture includes an external scale
+  reference.
+- PSNR and SSIM measure novel-view appearance, not absolute geometric accuracy.
 
-Quality is **measured, not asserted**: every 8th view is held out of training
-and the final PSNR and SSIM against those unseen views are recorded in
-`model/train.json` and in the package manifest.
-
-### Nested Cinema output
-
-The current master registers **736 views across five calibrated cameras** and
-retains **404,570 sparse COLMAP points** as reconstruction evidence. The
-visuals below are generated from that real text model, including the recovered
-camera centres and per-camera coverage—not from a synthetic example.
-
-![Photograph and reconstructed holdout view from the Nested Cinema master](docs/images/nested-cinema-photo-vs-reconstruction.png)
-
-| Registered sparse point cloud | COLMAP camera coverage, top view |
-|---|---|
-| ![Nested Cinema RGB COLMAP sparse point cloud with registered camera positions](docs/images/nested-cinema-colmap-point-cloud.png) | ![Top view of Nested Cinema COLMAP camera positions grouped by five camera models](docs/images/nested-cinema-colmap-camera-coverage.png) |
+These limitations are part of the preservation record because uncertainty is
+information, not an implementation detail.
 
 ## Documentation
 
 | Document | What it covers |
 |---|---|
-| [`AGENTS.md`](AGENTS.md) | Design rationale, measurements, environment traps — read before touching the trainer or profiles |
-| [`docs/undistortion-finding.md`](docs/undistortion-finding.md) | The lens-distortion bug: what broke, why it looked like a crop-size problem, the fix |
-| [`docs/nested-cinema-04-master.md`](docs/nested-cinema-04-master.md) | The full six-finding record behind the current best result |
+| [`AGENTS.md`](AGENTS.md) | Design rationale, measurements and environment traps |
+| [`docs/capture-sop.md`](docs/capture-sop.md) | How to photograph a room for reconstruction |
+| [`docs/preservation.md`](docs/preservation.md) | Archive structure, provenance and limitations |
+| [`docs/undistortion-finding.md`](docs/undistortion-finding.md) | Lens-distortion investigation and measured fix |
+| [`docs/nested-cinema-04-master.md`](docs/nested-cinema-04-master.md) | Full record behind the current scene result |
 | [`docs/PROJECT-PLAN.md`](docs/PROJECT-PLAN.md) | Roadmap and module status |
-| [`docs/progress.md`](docs/progress.md) | Backward-looking record of what has actually landed |
-| [`docs/capture-sop.md`](docs/capture-sop.md) | How to shoot a room so it reconstructs well |
-| [`docs/preservation.md`](docs/preservation.md) | What the archive package contains and why |
-| [`docs/5090-port-handoff.md`](docs/5090-port-handoff.md) | Porting the pipeline from Linux/RTX 3060 to Windows/RTX 5090 |
+| [`docs/progress.md`](docs/progress.md) | Backward-looking implementation record |
+| [`report/closeout-report.pdf`](report/closeout-report.pdf) | Scene and object reconstruction closeout report |
 
-## Related project — DreamLab Vitrine
+## Project boundaries and collaboration
 
-This pipeline is developed in collaboration with **DreamLab AI**, whose
-separate, GPL-licensed *Vitrine* lab stack ([DreamLab-AI/Vitrine](https://github.com/DreamLab-AI/Vitrine))
-handles object segmentation, meshing, and Unreal Engine 5.8 delivery. Same
-family name, different codebases and different licences — this repository
-does not depend on it and must not modify it, and it must not be merged into
-this one.
+The core UOS Vitrine repository owns scene capture, Gaussian Splat training,
+evaluation, archive packaging, the local GUI, and the secure contract through
+which object assets enter the preservation record.
 
-This repository is the **preservation pipeline** — archival master and
-measured splat. Where the two systems meet, the intended seam is a file-based
-handoff (registered images, COLMAP poses, `scene.ply`, checksummed manifest),
-not a shared codebase.
+The object-segmentation and reconstruction models remain a separate sidecar.
+This separation protects the MIT-licensed core from incompatible model and
+software licences while preserving a stable, checksummed file handoff.
 
-Also separate: **Vitrine Capture**, a FastAPI + React capture front-end.
+Vitrine is developed in collaboration with **DreamLab AI**. The separate
+GPL-licensed [DreamLab-AI/Vitrine](https://github.com/DreamLab-AI/Vitrine)
+stack explores downstream segmentation, meshing and Unreal Engine delivery.
+The projects share a research direction but remain distinct codebases.
 
 ## Acknowledgements
 
