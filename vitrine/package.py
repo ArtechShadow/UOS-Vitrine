@@ -124,7 +124,12 @@ on the registered images, external generative models, prompts and sidecar-
 specific processing. Treat them as derived, non-evidentiary interpretations. The
 `objects` list in `manifest.json` records each object's label, its `mesh_path`
 (relative to `derivatives/objects/`) and a SHA-256 checksum recomputed at
-packaging time, alongside the usual per-file checksums."""
+packaging time, alongside the usual per-file checksums.
+
+When present, `composed_scene` is a single glTF scene placing every object in the
+reconstructed space. It is a **composed derivative**: it mixes observed geometry/
+placement with generated geometry and textures. Per-object and per-material
+provenance is carried in the scene's node metadata — do not read it as a survey."""
 
 
 def _copy_tree(src: Path, dest: Path, *, description: str) -> int:
@@ -264,12 +269,15 @@ def build_package(
     # assets are checksummed with everything else) and recorded. Invalid or
     # absent output leaves the package byte-for-byte identical to a no-object run.
     object_records: list[dict[str, Any]] | None = None
+    composed_scene: dict[str, Any] | None = None
     if objects_dir is not None and Path(objects_dir).is_dir():
         try:
             object_records = objects_mod.load_validated_objects(Path(objects_dir))
+            composed_scene = objects_mod.load_validated_composed_scene(Path(objects_dir))
         except objects_mod.ObjectManifestError as exc:
             logger.warning("ignoring object sidecar output: %s", exc)
             object_records = None
+            composed_scene = None
         else:
             counts["objects"] = objects_mod.safe_copy_tree(
                 Path(objects_dir), output_root / "derivatives" / "objects"
@@ -314,6 +322,9 @@ def build_package(
     }
     if object_records is not None:
         manifest["objects"] = object_records
+    if composed_scene is not None:
+        # Path is relative to the archived derivatives/objects/ tree.
+        manifest["composed_scene"] = composed_scene
 
     manifest_path = output_root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

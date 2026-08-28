@@ -231,7 +231,18 @@ def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
             "coverage": rec.get("coverage"),
             "thumb_url": thumb_url,
         })
-    return {"count": len(items), "objects": items}
+    summary: dict[str, Any] = {"count": len(items), "objects": items}
+    # optional composed-scene glb (all objects placed in one glTF scene)
+    cs = doc.get("composed_scene") if isinstance(doc, dict) else None
+    if isinstance(cs, dict) and safe_component(str(cs.get("path", "")).split("/")[0]):
+        rel = cs["path"]
+        if (run_dir / "objects" / rel).is_file():
+            summary["composed_scene"] = {
+                "url": f"/files/{quote(name)}/objects/{quote(rel)}",
+                "sha256": cs.get("sha256"),
+                "derivative_class": "composed-derivative",
+            }
+    return summary
 
 
 def _summarise_run(run_dir: Path) -> dict[str, Any]:
