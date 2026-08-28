@@ -112,16 +112,16 @@ test case for a larger question:
 ## How it works
 
 ```mermaid
-flowchart TD
-    A["Photographs and video"] --> B["Ingest and camera grouping"]
-    B --> C["COLMAP pose reconstruction"]
-    C --> D["Gaussian Splat training"]
-    D --> E["Evaluation and scene export"]
-    E --> F["Optional object sidecar"]
-    F --> G["Segmentation and 3D reconstruction"]
-    G --> H["Object placement and composed scene"]
-    E --> I["Preservation package"]
-    H --> I
+flowchart TB
+    capture["Photographs and video"] --> ingest["Ingest and camera groups"]
+    ingest --> poses["COLMAP camera poses"]
+    poses --> train["Gaussian Splat training"]
+    train --> scene["Evaluate and export scene"]
+    scene --> archive["Preservation package"]
+    scene --> sidecar["Optional object sidecar"]
+    sidecar --> objects["Segment and reconstruct objects"]
+    objects --> compose["Place objects and compose scene"]
+    compose --> archive
 ```
 
 Each expensive stage writes a compact report and can be repeated independently.
@@ -223,6 +223,25 @@ The research harness has evaluated reconstruction lanes including
 **TRELLIS.2** and **ReconViaGen**. Current rankings are evidence for the tested
 Nested Cinema objects, not claims of universal model superiority.
 
+### From photograph to reusable object
+
+The examples below show real seed photographs paired with Lane-A TRELLIS.2
+reconstructions of the radio, table and speaker, followed by turntable views
+from angles that were not present in the conditioning photograph.
+
+![Seed photographs paired with reconstructed radio, table and speaker assets](report/figures/renders/assets_pairs.png)
+
+![Turntable views of Lane-A reconstructed Nested Cinema objects](report/figures/renders/laneA_turntables.png)
+
+### Comparing reconstruction approaches
+
+Candidate selection is evidence-based. The radio comparison below places the
+Lane-A and Lane-B results side by side; the current instance-aware evaluation
+ranks Lane A first for this tested object, while retaining the limitations of
+single-object evidence.
+
+![Radio object reconstruction comparison between Lane A and Lane B](report/figures/renders/radio_bakeoff_AvB.png)
+
 ### A secure file boundary
 
 The sidecar writes a versioned contract rather than importing code into the
@@ -244,6 +263,11 @@ Validated assets are archived under `derivatives/objects/`. The preservation
 manifest records stable per-object metadata and labels the composed scene as a
 derivative that may combine observed and generated content.
 
+The composed-scene proof places reconstructed assets back into the recovered
+environment. It is presented as a derivative rather than raw capture evidence.
+
+![Composed scene containing reconstructed objects placed into the Nested Cinema environment](report/figures/renders/composed_proof.png)
+
 ## Measured scene results
 
 | Run | Hardware | Views | PSNR | SSIM | Time |
@@ -260,6 +284,22 @@ so its figures are not directly comparable with the 222-view baseline.
 Quality is measured rather than asserted: every eighth view is held out of
 training, and PSNR and SSIM are recorded against photographs the optimiser did
 not see.
+
+### Reconstruction evidence
+
+The current master registers **736 views across five calibrated camera
+groups** and retains **404,570 sparse COLMAP points**. The visualisations below
+come from the real reconstruction rather than a synthetic example.
+
+| Registered sparse point cloud | Recovered camera coverage |
+|---|---|
+| ![Nested Cinema RGB COLMAP sparse point cloud](docs/images/nested-cinema-colmap-point-cloud.png) | ![Top view of registered cameras grouped by camera model](docs/images/nested-cinema-colmap-camera-coverage.png) |
+
+The matched-view comparison shows a source photograph beside a render from the
+same recovered camera. It makes both the achievement and the remaining loss of
+fine newspaper and fabric detail visible.
+
+![Source photograph compared with the Nested Cinema Gaussian Splat reconstruction](docs/images/nested-cinema-photo-vs-reconstruction.png)
 
 ## Research findings
 
