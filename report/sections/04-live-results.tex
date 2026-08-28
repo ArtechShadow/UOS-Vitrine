@@ -80,9 +80,10 @@ overlap ground-truth \texttt{object\_035} with high reproj-IoU (0.84--0.89) but 
 0.35; smaller 3D components recover individual objects better (best 3D-F1 0.519) but many are
 fragments (F1 $<$ 0.15). This contrasts with nested-cinema-04, where discrete, spatially separated
 objects carved cleanly. The method is sound where objects are separated and degrades where a class
-tiles the scene; the biggest available fix is per-instance masks rather than per-label unions.
+tiles the scene; per-instance masks rather than per-label unions are the primary fix.
 
 \subsection{Per-instance carve: pass 1 to pass 2}
+% SRC: runs/nc04-object-pass2/summary.json (frames, objects, rejected, timings)
 Pass~2 selected all 736 registered frames (including Camera~5's walkthrough, now extracted) and
 switched carve to per-instance masks. Object support rose sharply: \texttt{radio\#0} went from
 17{,}276 Gaussians over 16 views to 118{,}070 over 331, \texttt{table\#0} to 39{,}155 over 250,
@@ -94,14 +95,16 @@ and identify push the pass to \SI{4662}{\second}, dominated by rectify (\SI{2297
 identify (\SI{1891}{\second}).
 
 \subsection{Generation bake-off}\label{sec:objgen}
-Both lanes now produce assets that fit the ship target (Figure~\ref{fig:bakeoff}, \S\ref{sec:licence}).
+% SRC: runs/nc04-generate-pass1/*/candidates.json (Lane A); models-lane2/STATUS.md §Lane-B
+Both lanes produced assets whose reserved VRAM was measured under Linux/Ada below the 32\,GB target
+(Figure~\ref{fig:bakeoff}, \S\ref{sec:licence}); the Windows 11 / RTX 5090 acceptance run is still required.
 \textbf{Lane~A} (TRELLIS.2, single matted crop at $1024^3$) generated 12 of 12 candidates ---
 radio, table and speaker $\times$ four seeds --- with no failures. Reserved-VRAM peaks were
 \SI{9.1}{\giga\byte} (radio), \SI{5.3}{\giga\byte} (table) and \SI{7.7}{\giga\byte} (speaker),
 and per-seed runtimes ran \SIrange{37}{120}{\second}. \textbf{Lane~B} (ReconViaGen, textured GLB)
 produced a single-view radio at \SI{15.0}{\giga\byte} and a multi-view radio (top-8 IoU-ranked
-views) at \SI{16.6}{\giga\byte}; both textured GLBs are $\approx$17\,MB. Every variant clears the
-32\,GB ceiling, Lane~A with roughly $3.5\times$ headroom.
+views) at \SI{16.6}{\giga\byte}; both textured GLBs are $\approx$17\,MB. Every variant stayed under 32\,GB reserved on the 48\,GB Ada
+dev card, Lane~A with roughly $3.5\times$ headroom --- Linux/Ada evidence, not a Blackwell/5090 result.
 
 A first \texttt{composed\_scene.glb} exists for the radio, placing the Lane-A and Lane-B assets
 into the scene at solved transforms under an explicit basis contract (Figure~\ref{fig:composed}). Each object carries
@@ -147,10 +150,11 @@ visible holes on unobserved backs.}
 \centering
 % SRC: Blender turntables, runs/nc04-generate-pass1/radio (Lane A) vs runs/nc04-laneb-pass1/radio_00_multiview (Lane B)
 \includegraphics[width=0.98\textwidth]{renders/radio_bakeoff_AvB.png}
-\caption{Bake-off, visual: the radio reconstructed by Lane~A (TRELLIS.2 single crop, top) and
-Lane~B (ReconViaGen multi-view, bottom), same four viewpoints. Lane~A is a solid, closed housing
-with softer detail; Lane~B recovers more panel structure but strews floaters and thin shells. With
-numeric silhouette scoring still settling, this is the current bake-off evidence.}
+\caption{The radio reconstructed by Lane~A (TRELLIS.2 single crop, top) and Lane~B (ReconViaGen
+multi-view, bottom), same four viewpoints. Observations only: Lane~A yields a closed, continuous
+housing with soft surface detail; Lane~B yields separated front-panel components with visible
+floaters and thin shells. No quality ranking is implied --- numeric silhouette scoring is deferred
+(\S\ref{sec:eval-ranking}).}
 \label{fig:bakeoffvisual}
 \end{figure*}
 

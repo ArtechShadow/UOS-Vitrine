@@ -7,12 +7,12 @@ sm\_120 (Blackwell). Development and validation ran on 48\,GB RTX 6000 Ada cards
 peaks are to be measured under an enforced 32\,GB ceiling before any config is declared 5090-fit,
 and a real Windows/5090 acceptance run is the release gate. If that run cannot be executed from the
 development container, it is recorded as an explicit release blocker rather than hand-waved.
-\todo{Windows/5090 acceptance run on real hardware: this remains the release gate.} The measured
-evidence so far is under budget on every path. The object pass's instrumented stage (identify)
+Open at closeout: the Windows 11 / RTX 5090 acceptance run on real hardware remains the release gate.
+The measured evidence so far is under budget on every path. The object pass's instrumented stage (identify)
 peaked at \SI{6.6}{\giga\byte} (Figure~\ref{fig:vram}); generation reserved at most
 \SI{9.1}{\giga\byte} on Lane~A and \SI{16.6}{\giga\byte} on Lane~B (Figure~\ref{fig:bakeoff}). All
-clear the 32\,GB ceiling, Lane~A with roughly $3.5\times$ headroom, so the acceptance run is
-expected to confirm rather than discover the envelope.
+stayed under 32\,GB reserved on Linux/Ada, Lane~A with roughly $3.5\times$ headroom; the Windows/5090
+acceptance run is still required to confirm Blackwell fit.
 
 \begin{figure}[h]
 \centering
@@ -25,14 +25,16 @@ rather than assumed.}
 \end{figure}
 
 Licence gating decides what can ship. Table~\ref{tab:licence} reproduces the audited findings. The
-decisive point: ReconViaGen v0.5 does not load the Facebook VGGT checkpoint --- it loads
+key licence point: ReconViaGen v0.5 does not load the Facebook VGGT checkpoint --- it loads
 \texttt{Stable-X/vggt-object-v0-1}, a VGGT-architecture derivative with \emph{no declared licence},
 so a commercial deployment must treat it as encumbered by Meta's VGGT CC-BY-NC terms until clarified.
 The plain VGGT arm loads \texttt{facebook/VGGT-1B} (CC-BY-NC, research/eval only); its commercial
 checkpoint is gated behind a manual application form and was not accepted on the owner's behalf.
 Consequently \textbf{Lane~B is research/eval-only for this closeout} unless the commercial checkpoint
-is obtained. Lane~A (TRELLIS.2-4B, MIT) and everything else in the finishing path are clean. Every
-checkpoint used is recorded in lineage: repo, commit, hash and licence class.
+is obtained. Lane~A (TRELLIS.2-4B, MIT) and everything else in the finishing path are clean. DINOv3 (\texttt{facebook/dinov3-vitl16-pretrain-lvd1689m}) conditions the TRELLIS.2 image encoding
+in both lanes; its gated custom licence was accepted by the owner on 2026-08-28 and the checkpoint
+downloaded at install. Every checkpoint used is recorded in lineage: repo, commit, hash and licence
+class.
 
 \begin{table}[t]
 \centering\small
@@ -53,11 +55,14 @@ facebook/VGGT-1B & CC-BY-NC-4.0 & eval only \\
 facebook/VGGT-1B-Commercial & gated form & not accepted \\
 Hunyuan3D-2.1 & Tencent custom & review before ship \\
 SAM3.1 checkpoint (local) & unverified & verify before ship \\
+facebook/dinov3-vitl16 & gated custom & accepted 2026-08-28 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Two environment blockers keep Lane~B unreproduced here. ReconViaGen pins conda py3.10 +
+Lane~B is productive here --- it produced single- and multi-view textured GLBs (\S\ref{sec:objgen}).
+What is not yet reproduced is a clean-machine rebuild of ReconViaGen's pinned upstream environment
+and a commercial-eligible checkpoint path; two blockers stand behind that. ReconViaGen pins conda py3.10 +
 torch 2.4/cu121 with five source-compiled CUDA extensions and cp310 prebuilt wheels
 (flash-attn, kaolin, xformers), none installable on the container's nix py3.12; and it ships only a
 Gradio demo, so a headless run needs a custom driver written after the environment is solved. The

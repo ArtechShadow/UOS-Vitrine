@@ -58,3 +58,47 @@ automated run needs a custom driver around \texttt{TrellisHybridPipeline} after 
 \item \textbf{B3}: 256\,MB tmpfs caches hit ENOSPC; resolved by redirecting HF/pip/TMP caches to
 the workspace disk.
 \end{itemize}
+
+
+\section*{Appendix D: reproducibility}
+\addcontentsline{toc}{section}{Appendix D: reproducibility}
+% SRC: git rev-parse (uos-vitrine main, object-sidecar HEAD, PR branches); run REPORTs; scripts
+\small
+
+\textbf{Repositories and commits.} UoS Vitrine \texttt{main} at \texttt{0e3f862} (MIT, public).
+Object sidecar \texttt{main} at \texttt{ec4560e}. Open PRs against UoS:
+\href{https://github.com/ArtechShadow/UOS-Vitrine/pull/1}{\#1}
+(\texttt{feature/object-sidecar-hook-clean}) and
+\href{https://github.com/ArtechShadow/UOS-Vitrine/pull/2}{\#2}
+(\texttt{feature/composed-scene-export}).
+
+\textbf{Hardware matrix.} Dev/validation: RTX 6000 Ada (sm\_89, 48\,GB, GPU2) and A6000 (sm\_86);
+driver 610.57.04, CUDA 12.9 runtime; nix Python 3.11/3.12. Ship target (not yet run): Windows 11,
+RTX 5090 (sm\_120, 32\,GB).
+
+\textbf{Commands.}
+\begin{verbatim}
+# object pass (identify->carve->seed->emplace)
+cd object-sidecar && source smoke/env.sh
+CUDA_VISIBLE_DEVICES=2 .venv/bin/python -m sidecar run \
+  --package ../datasets/nested-cinema-04 \
+  --out ../runs/nc04-object-pass2 --max-frames 0
+# Lane-A generation (TRELLIS.2)
+python models-lane2/run_reconviagen.py   # Lane-B (uv py3.10 env)
+# charts + turntables
+.venv/bin/python scripts/make_closeout_charts.py
+blender --background --python scripts/render_turntable.py -- <glb> <out> <stem>
+\end{verbatim}
+
+\textbf{Artefact paths.} Scene runs \texttt{runs/nc04-object-pass\{1,2\}/}; generation
+\texttt{runs/nc04-generate-pass1/}; Lane-B \texttt{runs/nc04-laneb-pass1/}; golden eval
+\texttt{runs/gallery-object-eval/}; charts \texttt{runs/*/charts/}; renders and contact sheets under
+\texttt{runs/nc04-generate-pass1/radio/}.
+
+\textbf{Verification.} \texttt{vitrine verify <package>} re-hashes the manifest (note the
+Windows-backslash defect, \S6). Sidecar suite: \texttt{pytest -m "not slow"} (112 passed);
+UoS PR\#1 adds 62 tests.
+
+\textbf{Open gates at closeout.} Windows 11 / RTX 5090 acceptance run; carve de-contamination and
+refined silhouette scoring (then the quality-ranking chart); clean-machine ReconViaGen environment
+rebuild and a commercial-eligible checkpoint path; PR review and merge; sealed-package hashes.

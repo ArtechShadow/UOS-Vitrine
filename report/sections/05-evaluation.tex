@@ -3,7 +3,8 @@
 
 Evaluation is observed-vs-withheld throughout. A held-out azimuth sector (25\% of views
 on the gallery set) is never merged into observed metrics, so backside quality cannot be inflated by
-front-face coverage. Three metric families run: 3D F1 and IoU by voxel-occupancy overlap of carved
+front-face coverage. % SRC: runs/gallery-object-eval/validation.json + summary.json (metrics, GT counts)
+Three metric families run: 3D F1 and IoU by voxel-occupancy overlap of carved
 Gaussian centres against the best-matching ground-truth cloud (voxel = 1\% scene scale = 0.123);
 reproj-IoU, a coarse point-splat silhouette reprojected into each camera against the SAM mask; and
 mesh sanity (component count, watertightness, non-manifold edges) run on the reference mesh as a
@@ -40,18 +41,20 @@ Marker area $\propto$ carved Gaussians.}
 \end{figure}
 
 Resource cost across the bake-off is settled (Figure~\ref{fig:bakeoff}, \S\ref{sec:objgen}):
-every Lane-A and Lane-B variant clears the 32\,GB ceiling. Quality ranking is not, and the reason is
-diagnosed.\label{sec:eval-ranking} The numeric silhouette scores stay low regardless of the
-scale/translation search because the pass-2 radio Gaussian subset has an extent of about
-$15.8\times3.1\times10.7$ units in a scene of scale 9.2 --- the carve has picked up wall and floor,
-not just the radio. The emplacement anchor (centroid and extent) is therefore unreliable, so absolute
+every Lane-A and Lane-B variant stayed under 32\,GB reserved on Linux/Ada. Quality ranking is not, and the reason is
+diagnosed.\label{sec:eval-ranking} % SRC: measured from runs/nc04-object-pass2/objects/radio_00.ply (raw extent) + summary.json scene_scale
+The numeric silhouette scores stay low regardless of the
+scale/translation search because the pass-2 radio Gaussian subset spans $120.9\times44.1\times125.1$
+units in a scene of scale 9.2 --- about $13\times$ the whole scene --- so the per-object carve has
+leaked wall and floor into the object (the manifest's robust p5--p95 extent, $15.8\times3.1\times10.7$,
+understates it; the true radio core is $\approx$1.5 units). The emplacement anchor (centroid and extent) is therefore unreliable, so absolute
 silhouette IoU cannot be trusted as a lane discriminator. This is an upstream carve/mask-sparsity
 problem, not a generator or placement bug: generation quality (the turntables, Figure~\ref{fig:turntables})
 is the clean signal, while placement precision awaits a cleaner carve. The per-camera contact sheet
 (Figure~\ref{fig:contact}) shows the consequence directly --- the candidate silhouette spills beyond
 the object on several views. Until a cleaner carve lands, the contact sheets are the evidence of record
-and no numeric lane winner is claimed. \todo{Quality-ranking chart: per-object silhouette IoU /
-masked-DINO across lanes, once the carve is de-contaminated and refined scoring lands.}
+and no numeric lane winner is claimed. Open at closeout: the quality-ranking chart (per-object silhouette IoU / masked-DINO across
+lanes) is deferred until the carve is de-contaminated and refined scoring lands.
 
 \begin{figure}[h]
 \centering
