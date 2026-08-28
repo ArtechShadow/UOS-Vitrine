@@ -203,21 +203,33 @@ def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
     doc = _read_json(manifest)
     if not doc:
         return None
+    from urllib.parse import quote
+
+    from .objects import safe_component
+
     name = run_dir.name
-    records = doc.get("objects", []) if isinstance(doc, dict) else []
+    records = doc.get("objects") if isinstance(doc, dict) else None
+    if not isinstance(records, list):
+        return None
     items: list[dict[str, Any]] = []
     for rec in records:
         if not isinstance(rec, dict):
             continue
         oid = rec.get("object_id")
-        thumb_rel = f"objects/{oid}/turntable/view_00.png" if oid is not None else None
-        has_thumb = thumb_rel is not None and (run_dir / thumb_rel).is_file()
+        # A thumbnail is offered only for a safe, contained object id — never
+        # build a served path from an untrusted identifier.
+        thumb_url = None
+        if safe_component(oid):
+            thumb_rel = f"objects/{oid}/turntable/view_00.png"
+            candidate = (run_dir / thumb_rel).resolve()
+            if candidate.is_relative_to(run_dir.resolve()) and candidate.is_file():
+                thumb_url = f"/files/{quote(name)}/{quote(thumb_rel)}"
         items.append({
-            "object_id": oid,
-            "label": rec.get("label"),
+            "object_id": oid if safe_component(oid) else None,
+            "label": rec.get("label") if isinstance(rec.get("label"), str) else None,
             "confidence": rec.get("confidence"),
             "coverage": rec.get("coverage"),
-            "thumb_url": f"/files/{name}/{thumb_rel}" if has_thumb else None,
+            "thumb_url": thumb_url,
         })
     return {"count": len(items), "objects": items}
 
