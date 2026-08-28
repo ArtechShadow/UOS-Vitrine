@@ -1,0 +1,62 @@
+% SRC: report.md §1, §2.1-2.2, §7.1; PRD-001; ADR-001; DDD-001
+\section{Context and the two systems}
+
+Site-based immersive work is hard to preserve because its meaning is spread across
+physical construction, media content, spatial arrangement and time. A splat alone is
+insufficient: it does not identify its source images, camera positions, processing
+environment or inferred regions. \textit{Nested Cinema --- Vera's Not Alone} makes the
+problem concrete. The installation premiered at Salford's MediaCity campus in June 2023
+as the first public example of Prokopic's Nested Cinema practice-as-research, and the
+wider project secured a \pounds298{,}000 AHRC Catalyst Award in March 2026. The captured
+subject is a room-set inside a white gallery: newspaper-clad partitions, vintage radio
+and reel-to-reel equipment, domestic furniture, mirrors and moving screens. Fine printed
+text tests sharpness; screens and reflections violate the static Lambertian assumptions
+that make reconstruction tractable; once de-installed, the work survives through records
+rather than continued access.
+
+Two systems address adjacent parts of this problem and are deliberately kept separate.
+\textbf{UoS Vitrine (preservation)} asks whether a temporary installation can be captured,
+measured and packaged locally on modest hardware. It produces the authoritative archive
+master: originals with EXIF, COLMAP poses, an unquantised full-spherical-harmonic PLY, and
+a SHA-256 manifest. \textbf{The DreamLab object sidecar (derivation)} asks how that sealed
+package can yield per-object, correctly-placed, high-quality-textured assets without ever
+writing inside the archive. It is a separate repository with its own virtual environment
+behind a subprocess boundary, so no model dependency enters the MIT-licensed UoS tree.
+
+Their capabilities are complementary rather than overlapping (Table~\ref{tab:compare}). UoS
+Vitrine is strongest as a small, archive-first scene pipeline that runs on a 6\,GB laptop;
+the DreamLab stack is strongest at segmentation, object reconstruction and engine-ready
+assembly. The object sidecar is the disciplined subset of that stack needed to close this
+engagement: object derivation from a sealed package, nothing more.
+
+\begin{table}[t]
+\centering\small
+\caption{Comparative architecture. Complementary, deliberately separate.
+% SRC: report.md §7.2 (lines 329-339)
+}
+\label{tab:compare}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.28\columnwidth}p{0.30\columnwidth}p{0.30\columnwidth}@{}}
+\toprule
+Capability & UoS Vitrine & DreamLab \\
+\midrule
+Primary outcome & preservation package & structured scene \\
+Core scene & gsplat MCMC PLY & LichtFeld / alt path \\
+Hardware & 6\,GB laptop first & multi-GPU appliance \\
+Segmentation & external & SAM3.1 pipeline \\
+Object recon & external & TRELLIS.2 + backends \\
+Fixity & SHA-256 package & run lineage \\
+Licence & MIT & GPL + model terms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The split is a domain boundary, not just a packaging one. Three bounded contexts carry
+distinct languages: scene preservation (\emph{capture, ingest, sfm, train, package,
+verify}), object derivation (\emph{identify, rectify, carve, seed, generate, select, place,
+finish}), and reporting (\emph{evidence, observed/withheld, provenance}). Two invariants
+run through both systems. First, the run-directory is the unit of exchange and the sidecar
+only ever writes alongside it, never inside. Second, observed surfaces, metrics and texels
+are never averaged with withheld or generated ones --- real frames constrain, generated
+content proposes, and every asset carries a lineage record of its sources, checkpoints and
+scores.

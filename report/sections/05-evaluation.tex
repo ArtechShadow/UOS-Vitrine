@@ -1,0 +1,64 @@
+% SRC: VALIDATION.md §3-4; DESIGN.md validation; ADR-002 fairness
+\section{Evaluation}
+
+Evaluation is observed-vs-withheld throughout. A held-out azimuth sector (25\% of views
+on the gallery set) is never merged into observed metrics, so backside quality cannot be inflated by
+front-face coverage. Three metric families run: 3D F1 and IoU by voxel-occupancy overlap of carved
+Gaussian centres against the best-matching ground-truth cloud (voxel = 1\% scene scale = 0.123);
+reproj-IoU, a coarse point-splat silhouette reprojected into each camera against the SAM mask; and
+mesh sanity (component count, watertightness, non-manifold edges) run on the reference mesh as a
+baseline for scoring generated meshes later. The ground-truth \texttt{full\_scene.glb} is itself
+messy (11{,}583 verts, 356 components, not watertight, 654 non-manifold edges), which is a
+useful yardstick.
+
+Two limits qualify the current numbers, both recorded plainly. The reproj-IoU is a lower bound
+because there is no true rasteriser: a coarse splat silhouette muddies both the absolute IoU and the
+observed/withheld gap, which at this coverage is small and noisy (sometimes withheld exceeds
+observed). A real gsplat rasteriser would sharpen both. And the golden set may encode the old
+pipeline's assumptions, so it is used for golden regression tests only; a blinded fresh capture with
+withheld angular sectors is the true backside benchmark.
+
+Fairness rules for the lane bake-off (from adversarial review) are common mask and frame-selection
+inputs, identical finishing and eval, and both fixed-candidate-count and fixed-GPU-time comparisons
+with seed variance reported --- not just winners. Candidate selection runs at $512^3$/$1024^3$ and
+the winner is regenerated at ship quality.
+
+\subsection{Charts}
+One plot shows the over-merge (Figure~\ref{fig:overmerge}). Every marker is a carved object
+scored against its best-matching ground-truth cloud; area is the carved Gaussian count. Three
+over-merged blobs ($\geq$1M Gaussians) sit top-left: high reproj-IoU because they cover the frame,
+low 3D-F1 because they are not one object, while the smaller clean components reach higher F1 to
+the right. The lane bake-off chart fills once Lane-A/B runs land.
+
+\begin{figure}[h]
+\centering
+% SRC: runs/gallery-object-eval/validation.json via scripts/make_closeout_charts.py
+\includegraphics[width=\columnwidth]{gallery-object-eval/charts/gallery_f1_vs_reproj.pdf}
+\caption{Carve localises but over-merges where a class tiles the scene.
+Marker area $\propto$ carved Gaussians.}
+\label{fig:overmerge}
+\end{figure}
+
+Resource cost across the bake-off is settled (Figure~\ref{fig:bakeoff}, \S\ref{sec:objgen}):
+every Lane-A and Lane-B variant clears the 32\,GB ceiling. Quality ranking is not, and the reason is
+diagnosed.\label{sec:eval-ranking} The numeric silhouette scores stay low regardless of the
+scale/translation search because the pass-2 radio Gaussian subset has an extent of about
+$15.8\times3.1\times10.7$ units in a scene of scale 9.2 --- the carve has picked up wall and floor,
+not just the radio. The emplacement anchor (centroid and extent) is therefore unreliable, so absolute
+silhouette IoU cannot be trusted as a lane discriminator. This is an upstream carve/mask-sparsity
+problem, not a generator or placement bug: generation quality (the turntables, Figure~\ref{fig:turntables})
+is the clean signal, while placement precision awaits a cleaner carve. The per-camera contact sheet
+(Figure~\ref{fig:contact}) shows the consequence directly --- the candidate silhouette spills beyond
+the object on several views. Until a cleaner carve lands, the contact sheets are the evidence of record
+and no numeric lane winner is claimed. \todo{Quality-ranking chart: per-object silhouette IoU /
+masked-DINO across lanes, once the carve is de-contaminated and refined scoring lands.}
+
+\begin{figure}[h]
+\centering
+% SRC: runs/nc04-generate-pass1/radio/bakeoff_contact_sheets/radio_laneA_best.png (sidecar select stage)
+\includegraphics[width=\columnwidth]{renders/contact_radio_laneA.png}
+\caption{Per-camera evidence for the Lane-A radio: real frame, candidate silhouette (green) and
+absolute difference, across six real cameras. Where the green spills onto walls and furniture the
+carve has over-captured, which is why absolute silhouette IoU is not yet a reliable lane score.}
+\label{fig:contact}
+\end{figure}

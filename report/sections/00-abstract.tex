@@ -1,0 +1,31 @@
+% SRC: recovered-report/report.md Abstract (lines 12-20); object-sidecar PRD-001, VALIDATION.md, nc04-object-pass1/REPORT.md
+\begin{abstract}
+\small
+This report closes an engagement that joins two systems around one artwork.
+UoS Vitrine is a free, fully local pipeline that turns photographs and video of a
+physical space into a 3D Gaussian splat, packaged with its source material, camera
+solution, software record and checksums so the reconstruction can be treated as a
+defensible preservation object. The DreamLab object sidecar is a separate repository
+that consumes a sealed Vitrine run and derives per-object textured assets placed back
+into the scene, with strict separation of observed evidence from generated proposal.
+The test bed is \textit{Nested Cinema --- Vera's Not Alone}, Dr Pavel Prokopic's
+immersive installation at the University of Salford, MediaCityUK.
+
+The validated laptop scene run registered 222 of 222 images, trained one million
+Gaussians in \SI{60.4}{\minute} on an RTX 3060 Laptop GPU, and reached
+\SI{25.72}{\decibel} PSNR and 0.8167 SSIM on 28 held-out views at \SI{1.94}{\giga\byte}
+peak VRAM. An RTX 5090 reproduction of the same recipe reached \SI{25.06}{\decibel} and
+0.8211 SSIM in \SI{2.4}{\minute} --- matching laptop quality roughly 25 times faster.
+A workstation-archive profile (1600-pixel crop from 4096-pixel sources) suffered mass
+opacity collapse and is quarantined as an unvalidated negative result.
+
+The object sidecar runs end-to-end on the sealed package. On the live installation it
+carved six object candidates, four well-supported (table, radio, two speakers) from
+$\geq$15 views each. On the gallery golden set every eval metric computes against 33
+ground-truth object clouds; carve localises correctly but over-merges where one class
+tiles the scene. The reconstruction lane bake-off is partly open: Lane~A (TRELLIS.2) is
+clean-licensed and staged; Lane~B (ReconViaGen/VGGT) is research-only pending a
+commercial checkpoint and an unreproduced pinned environment. The two systems remain
+separate in code, licence and preservation responsibility, exchanging data through a
+versioned, checksummed file contract.
+\end{abstract}

@@ -1,0 +1,159 @@
+% SRC: report.md §3, §4.3, §5.1-5.3 (all numbers from the recovered draft)
+\section{Scene reconstruction results}
+
+UoS Vitrine runs as independently repeatable stages (ingest, SfM, training, evaluation,
+export, mesh derivation, packaging, verification), each writing a compact JSON report so
+expensive stages can be inspected or repeated in isolation. The same algorithm serves every
+hardware tier; profiles change only measured quantities (resolution, crop size, Gaussian
+cap, iterations). Mixed stills and video are handled with separate camera models (Figure~\ref{fig:coverage}): applying
+one set of intrinsics across both groups can silently warp the reconstruction. Training uses
+gsplat's MCMC densification under a hard population cap, random high-resolution crops to keep
+full-resolution texture in reach without rendering whole 4K frames per step, and an objective
+of $0.8\,L_1 + 0.2\,(1-\mathrm{SSIM})$ because pixel-wise losses stay tolerant of blur ---
+during development a blurred image held \SI{10.8}{\decibel} PSNR while SSIM collapsed to 0.013.
+
+\begin{figure}[t]
+\centering
+% SRC: uos-vitrine/docs/images/nested-cinema-colmap-camera-coverage.png (Glenn Watts, UoS Vitrine repo)
+\includegraphics[width=0.96\columnwidth]{nested-cinema-colmap-camera-coverage.png}
+\caption{COLMAP camera coverage over the room-set: the 222 registered stills and video frames
+solved as two camera models. Source: UoS Vitrine repository (G. Watts).}
+\label{fig:coverage}
+\end{figure}
+
+
+\subsection{Laptop and workstation measurements}
+On the target laptop (RTX 3060 Laptop, \SI{6}{\giga\byte}) the validated run staged 222 images,
+registered all of them, and recovered two camera models and 111{,}203 sparse points. Training
+completed 15{,}000 iterations in \SI{60.4}{\minute}, ending at one million Gaussians with
+full degree-three spherical harmonics, \SI{1.94}{\giga\byte} peak VRAM, and held-out metrics
+of \SI{25.72}{\decibel} PSNR / 0.8167 SSIM. VRAM was never the binding constraint; elapsed
+time was. The RTX 5090 control reused the proven recipe (768-pixel crop, 2048-pixel source,
+one-million cap, 15k iterations) and reached \SI{25.06}{\decibel} / 0.8211 SSIM in
+\SI{2.4}{\minute} at \SI{1.75}{\giga\byte}, matching laptop quality about 25 times faster.
+
+Two measurements explain why time, not memory, binds the laptop. Rasterisation cost tracks
+the number of Gaussians projected into the camera frustum, not the total population
+(Table~\ref{tab:frustum}): an interior camera typically observes about a third of the room,
+so the middle row is the practical basis for laptop estimates. The RTX 5090 reduces a
+comparable step to 12--14\,ms, at which point kernel-launch overhead flattens the
+frustum--time relationship. The same six profiles span both tiers by changing only measured
+quantities (Table~\ref{tab:profiles}); the workstation-archive row records the investigated
+configuration, not an approved preset.
+
+\begin{table}[t]
+\centering\small
+\caption{Laptop frustum occupancy dominates iteration time (1.5M Gaussians, $768^2$, SH~3).
+% SRC: report.md §4.1 (lines 193-199)
+}
+\label{tab:frustum}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}rr@{}}
+\toprule
+Gaussians in view & Time / iteration \\
+\midrule
+94\% & \SI{500}{\milli\second} \\
+39\% & \SI{222}{\milli\second} \\
+15\% & \SI{95}{\milli\second} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering\small
+\caption{Profiles. Same algorithm; only measured quantities change.
+% SRC: report.md §4.3 (lines 209-214)
+}
+\label{tab:profiles}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Profile & Src & Crop & Cap & Iters \\
+\midrule
+laptop-draft       & 1600 & 512  & 400k & 7k \\
+laptop-standard    & 2048 & 768  & 1.0M & 15k \\
+laptop-archive     & 2560 & 768  & 1.5M & 30k \\
+workstation-draft  & 2048 & 800  & 1.0M & 7k \\
+workstation-standard & 3200 & 1280 & 3.0M & 20k \\
+workstation-archive & 4096 & 1600 & 6.0M & 30k \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Archive-profile opacity collapse}
+Our strongest tested negative result isolates crop/source scale as the decisive variable
+(Table~\ref{tab:collapse}). Both healthy runs use 768/2048; both collapsed runs use 1600/4096.
+Reducing the cap from six million to one million did not restore the live population, and
+correcting the position-learning-rate horizon did not either. In the large-crop runs the
+fraction of Gaussians above the live-opacity threshold falls catastrophically: one random
+1600-pixel crop from a 4096-pixel source does not revisit each Gaussian often enough for
+reconstruction gradients to counter global opacity and scale regularisation, so MCMC relocates
+dead splats from a shrinking live pool. The empirical conclusion that 1600/4096 is unsafe in the
+current trainer is definitive; the mechanism remains a testable hypothesis. Live exported
+population therefore belongs beside PSNR and SSIM --- a nominal six-million cap says little if
+98.7\% of the population is effectively transparent.
+
+\begin{table}[t]
+\centering\small
+\caption{RTX 5090 controlled matrix. Crop/source scale, not cap, tracks the collapse.
+% SRC: report.md §5.3 table (lines 255-261)
+}
+\label{tab:collapse}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Run & Crop/src & Cap & Live g. & PSNR \\
+\midrule
+3060 baseline    & 768/2048  & 1.0M & 555k (55\%)  & 25.72 \\
+5090 control     & 768/2048  & 1.0M & 528k (53\%)  & 25.06 \\
+5090 candidate Q1& 1024/3072 & 1.5M & 940k (63\%)  & 24.71 \\
+5090 safe-cap    & 1600/4096 & 1.0M & 2.2k (0.2\%) & 17.49 \\
+5090 six-million & 1600/4096 & 6.0M & 80k (1.3\%)  & 14.31 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A matched-view diagnostic on held-out still \texttt{IMG\_6351} (Figure~\ref{fig:photovsrecon}) shows both splat renders soften
+sofa fabric, newspaper print and equipment detail that stay sharp in the source. The detail
+exists in the stills but does not survive reconstruction; the indicated next test is a
+stills-only baseline before reintroducing only the video frames that close a genuine coverage
+gap. The 5090 control is the honest working workstation result: it reproduces laptop quality
+about 25 times faster but does not yet exceed it.
+
+\begin{figure*}[t]
+\centering
+% SRC: uos-vitrine/docs/images/nested-cinema-photo-vs-reconstruction.png (Glenn Watts, UoS Vitrine repo)
+\includegraphics[width=0.92\textwidth]{nested-cinema-photo-vs-reconstruction.png}
+\caption{Matched-view comparison on the newspaper partition: source photograph (left) against the
+splat reconstruction (right) from the same COLMAP camera. The printed text and clip edges stay
+sharp in the source and soften in the render --- the detail is present in the stills but does not
+survive reconstruction. Source: UoS Vitrine repository (G. Watts).}
+\label{fig:photovsrecon}
+\end{figure*}
+
+
+\subsection{Energy and cost}
+The Windows runs sample GPU power through \texttt{nvidia-smi} and integrate it over training,
+costed at the recorded \pounds0.2703/kWh tariff (Table~\ref{tab:energy}). The control trains for
+about a third of a penny; the collapsed safe-cap run costs nearly four times as much to produce a
+worse result. These figures cover sampled GPU power, not whole-system wall energy, so they are
+valid for relative trainer comparison on this workstation but are not the full institutional cost.
+A wall-socket meter is the preferred boundary for the planned sustainability integration.
+
+\begin{table}[h]
+\centering\small
+\caption{Sampled-GPU energy and cost per 5090 run.
+% SRC: report.md §5.3 energy table (lines 277-281)
+}
+\label{tab:energy}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+Run & Time & Energy & Cost \\
+\midrule
+Control 768/2048   & \SI{2.4}{\minute} & \SI{0.013}{kWh} & \pounds0.0035 \\
+Q1 1024/3072       & \SI{3.0}{\minute} & \SI{0.018}{kWh} & \pounds0.0049 \\
+Safe-cap 1600/4096 & \SI{7.6}{\minute} & \SI{0.049}{kWh} & \pounds0.0132 \\
+\bottomrule
+\end{tabular}
+\end{table}

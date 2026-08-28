@@ -1,0 +1,51 @@
+% SRC: DESIGN.md (stages 1-9); ADR-003; DDD-001; ADR-002
+\section{Object pipeline: design and method}
+
+It consumes a Vitrine run read-only and emits \texttt{objects/objects.json}
+(schema \texttt{vitrine/object/1}) plus per-object GLBs and a composed scene. Nine stages
+run under one evidence-vs-proposal discipline.
+
+\textbf{Identify} runs GroundingDINO text prompts into SAM3.1 promptable segmentation per
+frame, degrading to a fixed concept list rather than blocking. \textbf{Rectify} enforces an
+explicit image-domain contract: the sidecar persists its own undistorted images and adjusted
+intrinsics (because UoS never persists undistorted images), replicating \texttt{undistort.py}
+maths under golden tests that require pixel-identical rectification for the same camera. Every
+artefact records which pixel domain (distorted or rectified) it lives in.
+
+\textbf{Carve} is the load-bearing correctness fix. A 2D mask votes for 3D Gaussians only
+through per-pixel front-depth-band gating (foreground / background / \emph{abstain}), with
+min-view thresholds, 3D connected-component cleanup and robust p5--p95 extents. The naive
+all-along-ray voting of the earlier DreamLab \texttt{mask\_projector} was rejected in adversarial
+review because it labels occluded Gaussians behind the object; carve is golden-tested against the
+gallery ground-truth object PLYs. \textbf{Seed} scores crops and views by silhouette area,
+sharpness, centrality and edge clearance: Lane~A takes the single best matted crop, Lane~B the
+top 8--16 diverse views. Splat renders are never used as conditioning.
+
+\textbf{Generate} runs two lanes under one harness (\S\ref{sec:licence}). \textbf{Select}
+renders every candidate from all recovered real cameras and scores silhouette IoU, masked
+perceptual similarity, depth consistency on observed regions and mesh sanity, reporting observed
+and withheld surfaces separately. \textbf{Place} is an owner hard requirement: it initialises
+translation and scale from the carve centroid and extents, then refines full SE(3)+scale by
+silhouette and photometric alignment against all real masks and frames. It is symmetry-aware and
+fits scene-up (EXIF gravity, support-plane fit, or the LiDAR GLB cross-check on
+nested-cinema-04) rather than assuming $+Y$. The composed scene rendered from real cameras is the
+acceptance proof, and the manifest records per-axis observability, residuals and confidence.
+
+\textbf{Finish} is the second hard requirement: UV unwrap (xatlas/Blender), then projective bake
+of real rectified frames onto observed UV islands with per-texel best-view selection by angle,
+sharpness and occlusion, and seam blending. Generative fill touches only unseen texels, recorded
+in a per-texel provenance mask, followed by albedo delighting. Real frames constrain; generated
+pixels propose, always flagged. \textbf{Manifest} writes one lineage record per object: sha256 of
+every asset \emph{and} every checkpoint (repo, commit, hash, licence class), stage scores, coverage
+estimate, orientation observability and VRAM peaks. No stage may silently substitute generated data
+where evidence exists; a missing stage output degrades the record's status field, never fakes it.
+
+\begin{figure}[h]
+\centering
+% SRC: seed crops runs/nc04-object-pass1/seed/ + Blender renders of runs/nc04-generate-pass1/*/ (scripts/render_turntable.py)
+\includegraphics[width=0.86\columnwidth]{renders/assets_pairs.png}
+\caption{From one photograph to an asset: the evidence-scored seed crop (left) and the Lane-A
+TRELLIS.2 reconstruction rendered from a fresh view (right), for radio, table and speaker. The
+generated geometry carries the crop's colour and structure; unobserved faces are inferred.}
+\label{fig:assetpairs}
+\end{figure}

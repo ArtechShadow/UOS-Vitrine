@@ -1,0 +1,30 @@
+% SRC: report.md §9; VALIDATION.md §5; DESIGN.md; ADR-002/003
+\section{Recommendations and handover}
+
+\textbf{Scene pipeline.} Quarantine the 1600/4096 workstation-archive profile and keep the
+\SI{25.06}{\decibel} RTX 5090 control as the verified workstation baseline. Do not promote the Q1
+candidate --- it stayed healthy but scored lower. Future tuning should vary one axis at a time
+(post-densification refinement, multi-crop batches, opacity regularisation) with live-opacity
+percentage monitored as an acceptance metric, rejecting runs below a declared health threshold. Run a
+stills-only 5090 baseline from the 72 archival masters before requesting any reshoot, and complete the
+formal newspaper-legibility and matched-view Luma comparisons using saved cameras rather than a single
+subjective orbit.
+
+\textbf{Object pipeline.} The biggest available fix is per-instance masks: feed each detection box's SAM
+mask into carve separately so tiling classes do not collapse into one blob. Add a real gsplat
+rasteriser for silhouette, PSNR and SSIM to sharpen the observed/withheld gap. Complete the lane
+bake-off once Lane~B's environment is stood up via the \texttt{uv} py3.10 route, and resolve the
+Stable-X checkpoint licence before any commercial Lane~B ship. Extract Camera~5's walkthrough frames to
+add the densest trajectory, and normalise GroundingDINO prompts to one per detect call.
+
+\textbf{Integration and handover.} Land the minimal additive UoS PR (\S6), including the
+Windows$\rightarrow$POSIX path normalisation in the packager/verify. Seal the preferred scene package
+with originals, COLMAP text model, training report, derivatives and limitations under a stable run
+identifier before creating any object or engine derivatives. Preserve stable IDs across masks, crops,
+selections, reconstructed assets and placements, and disable cloud fallbacks for preservation runs.
+The two repositories stay separate in code, licence, product identity and preservation responsibility;
+the file contract is the boundary that keeps them so.
+
+Both UoS PRs are open (sidecar hook \#1, composed-scene field \#2). The remaining gates are the
+Windows/5090 acceptance run, the refined-scoring lane winner regenerated at ship quality, PR review
+and merge, and the sealed-package hashes. \todo{Tick these off at final handover.}

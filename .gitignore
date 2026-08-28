@@ -19,7 +19,6 @@ reference/
 # Scratch / build artifacts — regenerable, not part of the record.
 tmp/
 output/
-report/
 .playwright-cli/
 
 # Funding-bid, pitch, and cross-partner strategy material — internal only.

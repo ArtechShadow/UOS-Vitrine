@@ -1,0 +1,68 @@
+% SRC: models-lane2/STATUS.md licence tables + blockers; ADR-002; DESIGN.md deployment envelope
+\section{Licence and deployment envelope}
+\label{sec:licence}
+
+The shipped configuration must fit the UoS target: Windows 11, RTX 5090, \SI{32}{\giga\byte} VRAM,
+sm\_120 (Blackwell). Development and validation ran on 48\,GB RTX 6000 Ada cards. Per-stage VRAM
+peaks are to be measured under an enforced 32\,GB ceiling before any config is declared 5090-fit,
+and a real Windows/5090 acceptance run is the release gate. If that run cannot be executed from the
+development container, it is recorded as an explicit release blocker rather than hand-waved.
+\todo{Windows/5090 acceptance run on real hardware: this remains the release gate.} The measured
+evidence so far is under budget on every path. The object pass's instrumented stage (identify)
+peaked at \SI{6.6}{\giga\byte} (Figure~\ref{fig:vram}); generation reserved at most
+\SI{9.1}{\giga\byte} on Lane~A and \SI{16.6}{\giga\byte} on Lane~B (Figure~\ref{fig:bakeoff}). All
+clear the 32\,GB ceiling, Lane~A with roughly $3.5\times$ headroom, so the acceptance run is
+expected to confirm rather than discover the envelope.
+
+\begin{figure}[h]
+\centering
+% SRC: runs/nc04-object-pass1/summary.json via scripts/make_closeout_charts.py
+\includegraphics[width=\columnwidth]{nc04-object-pass1/charts/vram_runtime.pdf}
+\caption{nc04 per-stage runtime with the measured VRAM peak against the 32\,GB ship ceiling.
+Only \texttt{identify} was VRAM-instrumented in pass~1; the others are marked as unmeasured
+rather than assumed.}
+\label{fig:vram}
+\end{figure}
+
+Licence gating decides what can ship. Table~\ref{tab:licence} reproduces the audited findings. The
+decisive point: ReconViaGen v0.5 does not load the Facebook VGGT checkpoint --- it loads
+\texttt{Stable-X/vggt-object-v0-1}, a VGGT-architecture derivative with \emph{no declared licence},
+so a commercial deployment must treat it as encumbered by Meta's VGGT CC-BY-NC terms until clarified.
+The plain VGGT arm loads \texttt{facebook/VGGT-1B} (CC-BY-NC, research/eval only); its commercial
+checkpoint is gated behind a manual application form and was not accepted on the owner's behalf.
+Consequently \textbf{Lane~B is research/eval-only for this closeout} unless the commercial checkpoint
+is obtained. Lane~A (TRELLIS.2-4B, MIT) and everything else in the finishing path are clean. Every
+checkpoint used is recorded in lineage: repo, commit, hash and licence class.
+
+\begin{table}[t]
+\centering\small
+\caption{Model licence gate (audited 2026-08-28).
+% SRC: models-lane2/STATUS.md; ADR-002 gate table
+}
+\label{tab:licence}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.40\columnwidth}p{0.30\columnwidth}p{0.20\columnwidth}@{}}
+\toprule
+Component & Licence & Gate \\
+\midrule
+ReconViaGen v0.5 code & MIT & clean \\
+microsoft/TRELLIS.2-4B & MIT & clean \\
+Stable-X/trellis-vggt-v0-2 & MIT & clean \\
+Stable-X/vggt-object-v0-1 & none declared & treat as NC \\
+facebook/VGGT-1B & CC-BY-NC-4.0 & eval only \\
+facebook/VGGT-1B-Commercial & gated form & not accepted \\
+Hunyuan3D-2.1 & Tencent custom & review before ship \\
+SAM3.1 checkpoint (local) & unverified & verify before ship \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two environment blockers keep Lane~B unreproduced here. ReconViaGen pins conda py3.10 +
+torch 2.4/cu121 with five source-compiled CUDA extensions and cp310 prebuilt wheels
+(flash-attn, kaolin, xformers), none installable on the container's nix py3.12; and it ships only a
+Gradio demo, so a headless run needs a custom driver written after the environment is solved. The
+recommended route is a \texttt{uv}-managed standalone py3.10 in the workspace (mechanism confirmed;
+the Docker-via-host-socket route is a documented mount trap). The VGGT arm is fully operational: a
+smoke test inferred six gallery frames in \SI{0.94}{\second} at \SI{8.1}{\giga\byte} peak. Lane~A
+TRELLIS.2-4B weights (\SI{16}{\giga\byte}) are staged on disk by symlink from a read-only mount, so
+no re-download was needed.

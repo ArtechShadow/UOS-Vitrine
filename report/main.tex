@@ -1,0 +1,65 @@
+% UoS Vitrine + DreamLab Object Sidecar — combined closeout report
+% Engine: pdflatex (TeX Live 2025). Build: make (see Makefile).
+% Sources for every figure/number are cited in-line as % SRC: comments.
+\documentclass[10pt,twocolumn,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[british]{babel}
+\usepackage[a4paper,margin=16mm,columnsep=6mm]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{siunitx}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}
+
+% Figures live in the sidecar/run tree, referenced read-only.
+\graphicspath{{figures/}{../../runs/}{../../runs/nc04-object-pass1/}{../../runs/gallery-object-eval/}{figures/nc04-object-pass1/}{figures/gallery-object-eval/}{figures/nc04-generate-pass1/}{../../runs/nc04-generate-pass1/}}
+
+% \todo{...} — a visible placeholder for content pending a run.
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+
+% Compact captions and headings for a dense two-column layout.
+\captionsetup{font=small,labelfont=bf,skip=3pt}
+\setlist{nosep,leftmargin=1.2em}
+\titlespacing*{\section}{0pt}{6pt}{2pt}
+\titlespacing*{\subsection}{0pt}{4pt}{1pt}
+\sisetup{detect-weight=true,detect-family=true}
+
+\setlength{\parskip}{2pt}
+\setlength{\parindent}{0pt}
+
+\title{\vspace{-8mm}\textbf{Archive-grade scene preservation and derived object
+reconstruction: a combined closeout}\\[2pt]
+\large Nested Cinema --- \textit{Vera's Not Alone}: UoS Vitrine scene pipeline and
+the DreamLab object sidecar}
+
+\author{Glenn Watts (UoS Vitrine, University of Salford)\\
+DreamLab AI Consulting Ltd (object sidecar)\\[2pt]
+\small Combined evidence to 28 August 2026}
+\date{}
+
+\begin{document}
+\maketitle
+
+\input{sections/00-abstract}
+\input{sections/01-context}
+\input{sections/02-scene-results}
+\input{sections/03-object-design}
+\input{sections/04-live-results}
+\input{sections/05-evaluation}
+\input{sections/06-interface-contract}
+\input{sections/07-licence-deployment}
+\input{sections/08-limitations}
+\input{sections/09-recommendations}
+\input{sections/10-appendix}
+
+\end{document}
