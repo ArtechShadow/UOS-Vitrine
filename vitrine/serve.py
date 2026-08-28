@@ -193,6 +193,35 @@ def _list_image_samples(run_dir: Path, limit: int = 24) -> list[dict[str, str]]:
     return samples
 
 
+def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
+    """Read-only summary of the object sidecar's output, or ``None`` if absent.
+
+    Count, labels and a turntable thumbnail per object — enough for a small
+    dashboard panel without the server needing to understand the sidecar.
+    """
+    manifest = run_dir / "objects" / "objects.json"
+    doc = _read_json(manifest)
+    if not doc:
+        return None
+    name = run_dir.name
+    records = doc.get("objects", []) if isinstance(doc, dict) else []
+    items: list[dict[str, Any]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        oid = rec.get("object_id")
+        thumb_rel = f"objects/{oid}/turntable/view_00.png" if oid is not None else None
+        has_thumb = thumb_rel is not None and (run_dir / thumb_rel).is_file()
+        items.append({
+            "object_id": oid,
+            "label": rec.get("label"),
+            "confidence": rec.get("confidence"),
+            "coverage": rec.get("coverage"),
+            "thumb_url": f"/files/{name}/{thumb_rel}" if has_thumb else None,
+        })
+    return {"count": len(items), "objects": items}
+
+
 def _summarise_run(run_dir: Path) -> dict[str, Any]:
     name = run_dir.name
     status = _stage_status(run_dir)
@@ -284,6 +313,7 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
             "electricity_rate_gbp_per_kwh": electricity_rate,
         },
         "artefacts": artefacts,
+        "objects": _objects_summary(run_dir),
         "has_viewer": bool(artefacts["scene_splat"]),
         "viewer_url": f"/viewer/{name}" if artefacts["scene_splat"] else None,
         "splat_url": f"/files/{name}/model/scene.splat" if artefacts["scene_splat"] else None,

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -210,8 +211,59 @@ def cmd_package(args: argparse.Namespace) -> int:
         ingest_report=load(run_dir / "ingest" / "ingest.json"),
         sfm_report=load(run_dir / "sfm" / "sfm.json"),
         profile=profiles.describe(profile),
+        objects_dir=run_dir / "objects",
     )
     print(f"\npackage: {result.file_count} files, {result.total_bytes / 2**30:.2f} GB → {result.root}")
+    return 0
+
+
+def cmd_objects(args: argparse.Namespace) -> int:
+    """Run the external object-reconstruction sidecar over this run.
+
+    The sidecar is a *separate* project with its own environment and model
+    licences; we invoke it as a subprocess and never import it, so its
+    dependencies stay out of this MIT tree. It reads the run's registered
+    images, COLMAP poses and scene splat, and writes per-object assets plus an
+    ``objects.json`` (schema ``vitrine/object/1``) into ``<run-dir>/objects/``,
+    which ``package`` then folds into the preservation manifest.
+    """
+    import shlex
+    import subprocess
+
+    run_dir = _run_dir(args)
+    sidecar = args.sidecar or os.environ.get("VITRINE_OBJECT_SIDECAR")
+    if not sidecar:
+        print(
+            "no object sidecar configured. Point --sidecar at its entrypoint, or\n"
+            "set VITRINE_OBJECT_SIDECAR (e.g. 'python -m sidecar' from the sidecar's\n"
+            "own environment). The sidecar is a separate install — see its README.",
+            file=sys.stderr,
+        )
+        return 2
+
+    out_dir = run_dir / "objects"
+    command = [*shlex.split(sidecar), "--package", str(run_dir), "--out", str(out_dir)]
+    logger.info("objects: %s", " ".join(command))
+    try:
+        result = subprocess.run(command)
+    except OSError as exc:
+        logger.error("could not launch sidecar %r: %s", sidecar, exc)
+        return 1
+    if result.returncode != 0:
+        logger.error("sidecar exited with status %d", result.returncode)
+        return result.returncode
+
+    manifest = out_dir / "objects.json"
+    if manifest.is_file():
+        try:
+            doc = json.loads(manifest.read_text(encoding="utf-8"))
+            objects = doc.get("objects", []) if isinstance(doc, dict) else []
+            labels = ", ".join(str(o.get("label", "?")) for o in objects) or "none"
+            print(f"\nobjects: {len(objects)} recovered — {labels}")
+        except (OSError, json.JSONDecodeError):
+            print(f"\nobjects: wrote {out_dir} (objects.json unreadable)")
+    else:
+        print(f"\nobjects: sidecar finished but wrote no objects.json in {out_dir}")
     return 0
 
 
@@ -315,6 +367,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_package.add_argument("--subject", default="Not recorded.")
     p_package.set_defaults(func=cmd_package)
 
+    p_objects = sub.add_parser("objects", help="run the external object-reconstruction sidecar")
+    p_objects.add_argument("--sidecar", default=None,
+                           help="sidecar entrypoint (else $VITRINE_OBJECT_SIDECAR)")
+    p_objects.set_defaults(func=cmd_objects)
+
     p_evaluate = sub.add_parser("evaluate", help="measure a trained splat, per camera group")
     p_evaluate.add_argument("--ply", default=None, help="defaults to <run-dir>/model/scene.ply")
     p_evaluate.set_defaults(func=cmd_evaluate)
@@ -351,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     log_file = None
-    if args.command in {"ingest", "sfm", "train", "package", "run"}:
+    if args.command in {"ingest", "sfm", "train", "package", "run", "objects"}:
         log_file = Path(args.run_dir) / "logs" / "vitrine.log"
     _setup_logging(args.verbose, log_file)
     try:
