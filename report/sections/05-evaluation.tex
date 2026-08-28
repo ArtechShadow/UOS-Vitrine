@@ -52,9 +52,16 @@ silhouette IoU cannot be trusted as a lane discriminator. This is an upstream ca
 problem, not a generator or placement bug: generation quality (the turntables, Figure~\ref{fig:turntables})
 is the clean signal, while placement precision awaits a cleaner carve. The per-camera contact sheet
 (Figure~\ref{fig:contact}) shows the consequence directly --- the candidate silhouette spills beyond
-the object on several views. Until a cleaner carve lands, the contact sheets are the evidence of record
-and no numeric lane winner is claimed. Open at closeout: the quality-ranking chart (per-object silhouette IoU / masked-DINO across
-lanes) is deferred until the carve is de-contaminated and refined scoring lands.
+the object on several views. The contact sheets are the evidence of record
+and no numeric lane winner is claimed. Since that measurement, the carve leak's root cause was found
+and fixed: the automatic depth band was inflated by outlier Gaussians, and a robust p5--p95 band
+(commit \texttt{ec4560e}) re-carves the radio to a clean 2{,}093-Gaussian cluster of extent
+$0.44\times0.49\times0.46$ units --- a plausible object core in a scene of scale 9.2.
+% SRC: runs/nc04-generate-pass1/recarve_score.log (CLEAN_CARVE line)
+Open at closeout: the quality-ranking chart (per-object silhouette IoU / masked-DINO across lanes)
+remains deferred --- the carve is de-contaminated, but the scoring pass against the clean subset
+currently returns degenerate zeros (a projection-domain alignment issue under diagnosis), so no
+ranking is published until that is resolved.
 
 \begin{figure}[h]
 \centering

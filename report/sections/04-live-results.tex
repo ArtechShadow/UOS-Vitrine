@@ -90,9 +90,19 @@ switched carve to per-instance masks. Object support rose sharply: \texttt{radio
 \texttt{speaker\#0} to 52{,}964 over 242. Nine candidates passed and three were rejected on the
 min-view floor (\texttt{armchair}, \texttt{gramophone}, \texttt{mirror}, all
 \texttt{insufficient\_views}) rather than kept as weak detections --- the pass-1 ``weak pair''
-problem is now handled by a rejected list, not a caveat. The cost is wall-time: full-frame rectify
-and identify push the pass to \SI{4662}{\second}, dominated by rectify (\SI{2297}{\second}) and
-identify (\SI{1891}{\second}).
+problem is now handled by a rejected list, not a caveat. Detection-anchored instance separation
+raised the candidate count from 6 to 19 with clean single-word labels (radio $2\to6$ instances,
+speaker $2\to5$); per-prompt detection removed the phrase-merged labels of pass~1.
+% SRC: runs/nc04-pass1-vs-pass2.json (candidate/instance deltas)
+The cost is wall-time: full-frame rectify
+and identify push the pass to \SI{4662}{\second}, dominated by rectify (\SI{2297}{\second}, now
+cached across stage re-runs) and identify (\SI{1891}{\second}).
+
+The pass-2 parameters are baked as the shipped defaults, each chosen by measurement rather than
+preference: per-prompt detection, a min-view floor of four, detection resolution 2048 (A/B against
+a 2560 reference gave mask IoU 0.99, against 0.87 at 1280, with no gain at 1536), per-instance
+carve, all posed frames, and an 80-view-per-label projection cap.
+% SRC: runs/nc04-object-pass2/REPORT.md (baked defaults, detect-res A/B)
 
 \subsection{Generation bake-off}\label{sec:objgen}
 % SRC: runs/nc04-generate-pass1/*/candidates.json (Lane A); models-lane2/STATUS.md §Lane-B

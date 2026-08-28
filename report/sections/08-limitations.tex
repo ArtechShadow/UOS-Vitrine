@@ -16,7 +16,11 @@ Gaussian subset (118{,}070 splats) spans $120.9\times44.1\times125.1$ units in a
 --- roughly $13\times$ the whole scene, i.e. the per-object carve leaked the entire room into the
 object. The manifest's robust p5--p95 extent field ($15.8\times3.1\times10.7$) understates this; the
 radio's true core is about 1.5 units (inter-quartile). This upstream carve/mask-sparsity leak, not
-any generation or placement defect, is what caps silhouette-refined placement until the carve is
+any generation or placement defect, was traced to an outlier-inflated automatic depth band; a
+robust p5--p95 band (commit \texttt{ec4560e}) restores a clean $\approx$0.5-unit radio cluster
+(2{,}093 Gaussians), and the remaining gap is scorer projection alignment rather than the carve.
+% SRC: runs/nc04-generate-pass1/recarve_score.log
+Before that fix, the leak was what capped silhouette-refined placement until the carve was
 cleaned.
 Orientation remains the weakest emplacement axis: placement solves translation and scale from the
 carve subset reliably, but full orientation must be recovered from silhouettes and is marked
