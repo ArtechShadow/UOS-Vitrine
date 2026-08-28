@@ -1,0 +1,147 @@
+% SRC: nc04-object-pass1/REPORT.md (all numbers, camera table, object table)
+\section{Live results: Nested Cinema 04}
+
+Run \texttt{nc04-object-pass1} was the sidecar's first contact with the real scene, on an
+RTX 6000 Ada, wall-time \SI{352}{\second}. The COLMAP model holds 736 registered images
+across five OPENCV cameras and a 2.0M-Gaussian splat; 79 frames were selected by stratified
+sampling. Camera~5, a 4K walkthrough of 120 registered frames, contributes nothing because
+the package ships only the \texttt{.MOV} and no frames were extracted; video decode is out of
+scope for pass~1, so this is recorded as an explicit gap. Rectify dominated wall-time
+(\SI{227}{\second} of \SI{352}{\second}) through HEIC decode and full-resolution undistort of the
+3200-class frames.
+
+Six object candidates were carved (Table~\ref{tab:nc04}). Four are well-supported: the table
+(most-supported, 21 views), the vintage radio, and two speakers that \texttt{carve\_components}
+correctly separated as distinct 3D instances from one \texttt{speaker} mask set. Two are
+problematic: \texttt{armchair chair} rests on only two views (a confidence of 1.00 is unreliable
+at that count, and the label is phrase-merged), and \texttt{radio\#1} is a smaller second component
+that may be a genuine second unit or a fragment. Seed crops confirm real installation objects: vintage
+radios, cassette decks, a record-player case, a table. Figure~\ref{fig:seedcrops} shows
+three of the evidence-scored seed crops.
+
+\begin{table}[t]
+\centering\small
+\caption{nc04 object candidates. Four well-carved, two marginal.
+% SRC: nc04-object-pass1/REPORT.md object table (lines 22-30)
+}
+\label{tab:nc04}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrcl@{}}
+\toprule
+Label & Gauss. & conf & views & verdict \\
+\midrule
+table          & 38{,}383 & 0.80 & 21 & good (best) \\
+radio \#0      & 17{,}276 & 0.87 & 16 & good \\
+armchair chair & 19{,}055 & 1.00 & 2  & weak \\
+speaker \#0    & 6{,}754  & 0.80 & 15 & good \\
+speaker \#1    & 3{,}202  & 0.95 & 15 & good (2nd inst.) \\
+radio \#1      & 6{,}286  & 0.87 & 16 & fair (fragment?) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.31\columnwidth}
+\includegraphics[width=\linewidth]{nc04-object-pass1/seed/table_00_crop.png}
+\caption*{\tiny table}
+\end{subfigure}\hfill
+\begin{subfigure}{0.31\columnwidth}
+\includegraphics[width=\linewidth]{nc04-object-pass1/seed/radio_00_crop.png}
+\caption*{\tiny radio}
+\end{subfigure}\hfill
+\begin{subfigure}{0.31\columnwidth}
+\includegraphics[width=\linewidth]{nc04-object-pass1/seed/speaker_00_crop.png}
+\caption*{\tiny speaker}
+\end{subfigure}
+\caption{Evidence-scored seed crops from the live installation.
+% SRC: runs/nc04-object-pass1/seed/*.png
+}
+\label{fig:seedcrops}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+% SRC: runs/nc04-object-pass1/summary.json via scripts/make_closeout_charts.py
+\includegraphics[width=\columnwidth]{nc04-object-pass1/charts/nc04_objects.pdf}
+\caption{Carved candidates: Gaussian count (bars), supporting views (markers) and carve
+confidence. The two below the 15-view line (armchair at 2 views, radio\#1 fragment) are the
+weak pair.}
+\label{fig:nc04objects}
+\end{figure}
+
+\subsection{Carve metrics on the golden set}
+On the gallery golden set the full object path ran over 121 frames and scored each carved object
+against 33 ground-truth object clouds. Every eval metric computes --- the primary validation goal.
+Carve localises the right region but does not yet separate instances on an adversarial scene: the
+gallery is wall-to-wall same-class paintings, so per-label mask unions cover most of each frame and
+carve votes a large fraction of the splat foreground. Three ``objects'' of 1.5--2.4M Gaussians each
+overlap ground-truth \texttt{object\_035} with high reproj-IoU (0.84--0.89) but only 3D-F1 $\approx$
+0.35; smaller 3D components recover individual objects better (best 3D-F1 0.519) but many are
+fragments (F1 $<$ 0.15). This contrasts with nested-cinema-04, where discrete, spatially separated
+objects carved cleanly. The method is sound where objects are separated and degrades where a class
+tiles the scene; the biggest available fix is per-instance masks rather than per-label unions.
+
+\subsection{Per-instance carve: pass 1 to pass 2}
+Pass~2 selected all 736 registered frames (including Camera~5's walkthrough, now extracted) and
+switched carve to per-instance masks. Object support rose sharply: \texttt{radio\#0} went from
+17{,}276 Gaussians over 16 views to 118{,}070 over 331, \texttt{table\#0} to 39{,}155 over 250,
+\texttt{speaker\#0} to 52{,}964 over 242. Nine candidates passed and three were rejected on the
+min-view floor (\texttt{armchair}, \texttt{gramophone}, \texttt{mirror}, all
+\texttt{insufficient\_views}) rather than kept as weak detections --- the pass-1 ``weak pair''
+problem is now handled by a rejected list, not a caveat. The cost is wall-time: full-frame rectify
+and identify push the pass to \SI{4662}{\second}, dominated by rectify (\SI{2297}{\second}) and
+identify (\SI{1891}{\second}).
+
+\subsection{Generation bake-off}\label{sec:objgen}
+Both lanes now produce assets that fit the ship target (Figure~\ref{fig:bakeoff}, \S\ref{sec:licence}).
+\textbf{Lane~A} (TRELLIS.2, single matted crop at $1024^3$) generated 12 of 12 candidates ---
+radio, table and speaker $\times$ four seeds --- with no failures. Reserved-VRAM peaks were
+\SI{9.1}{\giga\byte} (radio), \SI{5.3}{\giga\byte} (table) and \SI{7.7}{\giga\byte} (speaker),
+and per-seed runtimes ran \SIrange{37}{120}{\second}. \textbf{Lane~B} (ReconViaGen, textured GLB)
+produced a single-view radio at \SI{15.0}{\giga\byte} and a multi-view radio (top-8 IoU-ranked
+views) at \SI{16.6}{\giga\byte}; both textured GLBs are $\approx$17\,MB. Every variant clears the
+32\,GB ceiling, Lane~A with roughly $3.5\times$ headroom.
+
+A first \texttt{composed\_scene.glb} exists for the radio, placing the Lane-A and Lane-B assets
+into the scene at solved transforms under an explicit basis contract. Each object carries
+provenance classes in \texttt{composed\_scene\_objects.json}: \texttt{geometry\_class=generated},
+\texttt{material\_class=generated}, \texttt{placement\_class=carve-init}, and
+\texttt{derivative\_class=composed-derivative}, so the placement is marked as carve-centroid
+initialised, not yet silhouette-refined.
+
+\begin{figure}[h]
+\centering
+% SRC: runs/nc04-generate-pass1/*/candidates.json + models-lane2/STATUS.md via make_closeout_charts.py
+\includegraphics[width=\columnwidth]{nc04-generate-pass1/charts/bakeoff_vram.pdf}
+\caption{Bake-off resource envelope: reserved-VRAM peak per variant against the 32\,GB ceiling,
+with runtime. Lane-A peaks are the max across four seeds; Lane-B are the textured single/multi-view
+runs.}
+\label{fig:bakeoff}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+% SRC: Blender turntables of runs/nc04-generate-pass1/{radio,table,speaker} best seeds (scripts/render_turntable.py)
+\includegraphics[width=\columnwidth]{renders/laneA_turntables.png}
+\caption{Lane-A TRELLIS.2 objects, four turntable views each (radio, table, speaker; best seed by
+mesh detail). Real generated 3D assets with baked texture; carving and single-crop generation leave
+visible holes on unobserved backs.}
+\label{fig:turntables}
+\end{figure}
+
+\begin{figure*}[t]
+\centering
+% SRC: Blender turntables, runs/nc04-generate-pass1/radio (Lane A) vs runs/nc04-laneb-pass1/radio_00_multiview (Lane B)
+\includegraphics[width=0.98\textwidth]{renders/radio_bakeoff_AvB.png}
+\caption{Bake-off, visual: the radio reconstructed by Lane~A (TRELLIS.2 single crop, top) and
+Lane~B (ReconViaGen multi-view, bottom), same four viewpoints. Lane~A is a solid, closed housing
+with softer detail; Lane~B recovers more panel structure but strews floaters and thin shells. With
+numeric silhouette scoring still settling, this is the current bake-off evidence.}
+\label{fig:bakeoffvisual}
+\end{figure*}
+
+Quality ranking across lanes is deferred: the nc04 numeric silhouette scores are not yet
+reliable (the scale bracket was only just fixed via the manifest \texttt{scene\_scale}, and refined
+scoring is running), so visual contact sheets are the current evidence and no numeric lane winner is
+claimed. The ranking chart lands when refined scoring completes (\S\ref{sec:eval-ranking}).

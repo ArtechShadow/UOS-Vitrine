@@ -1,0 +1,48 @@
+% SRC: VALIDATION.md §3-4; DESIGN.md validation; ADR-002 fairness
+\section{Evaluation}
+
+Evaluation is observed-vs-withheld throughout. A held-out azimuth sector (25\% of views
+on the gallery set) is never merged into observed metrics, so backside quality cannot be inflated by
+front-face coverage. Three metric families run: 3D F1 and IoU by voxel-occupancy overlap of carved
+Gaussian centres against the best-matching ground-truth cloud (voxel = 1\% scene scale = 0.123);
+reproj-IoU, a coarse point-splat silhouette reprojected into each camera against the SAM mask; and
+mesh sanity (component count, watertightness, non-manifold edges) run on the reference mesh as a
+baseline for scoring generated meshes later. The ground-truth \texttt{full\_scene.glb} is itself
+messy (11{,}583 verts, 356 components, not watertight, 654 non-manifold edges), which is a
+useful yardstick.
+
+Two limits qualify the current numbers, both recorded plainly. The reproj-IoU is a lower bound
+because there is no true rasteriser: a coarse splat silhouette muddies both the absolute IoU and the
+observed/withheld gap, which at this coverage is small and noisy (sometimes withheld exceeds
+observed). A real gsplat rasteriser would sharpen both. And the golden set may encode the old
+pipeline's assumptions, so it is used for golden regression tests only; a blinded fresh capture with
+withheld angular sectors is the true backside benchmark.
+
+Fairness rules for the lane bake-off (from adversarial review) are common mask and frame-selection
+inputs, identical finishing and eval, and both fixed-candidate-count and fixed-GPU-time comparisons
+with seed variance reported --- not just winners. Candidate selection runs at $512^3$/$1024^3$ and
+the winner is regenerated at ship quality.
+
+\subsection{Charts}
+One plot shows the over-merge (Figure~\ref{fig:overmerge}). Every marker is a carved object
+scored against its best-matching ground-truth cloud; area is the carved Gaussian count. Three
+over-merged blobs ($\geq$1M Gaussians) sit top-left: high reproj-IoU because they cover the frame,
+low 3D-F1 because they are not one object, while the smaller clean components reach higher F1 to
+the right. The lane bake-off chart fills once Lane-A/B runs land.
+
+\begin{figure}[h]
+\centering
+% SRC: runs/gallery-object-eval/validation.json via scripts/make_closeout_charts.py
+\includegraphics[width=\columnwidth]{gallery-object-eval/charts/gallery_f1_vs_reproj.pdf}
+\caption{Carve localises but over-merges where a class tiles the scene.
+Marker area $\propto$ carved Gaussians.}
+\label{fig:overmerge}
+\end{figure}
+
+Resource cost across the bake-off is settled (Figure~\ref{fig:bakeoff}, \S\ref{sec:objgen}):
+every Lane-A and Lane-B variant clears the 32\,GB ceiling. Quality ranking is not. The nc04 numeric
+silhouette scores are not yet reliable, because the object-to-scene scale bracket was only just
+fixed by reading \texttt{scene\_scale} from the manifest and refined scoring is still running. Until
+it completes, visual contact sheets are the evidence of record and no numeric lane winner is
+claimed.\label{sec:eval-ranking} \todo{Quality-ranking chart: per-object silhouette IoU /
+masked-DINO across lanes, once refined scoring lands.}

@@ -1,0 +1,60 @@
+% SRC: report.md Appendix C; models-lane2/STATUS.md; DESIGN.md
+\onecolumn
+\section*{Appendix A: environment snapshot}
+\addcontentsline{toc}{section}{Appendix A: environment snapshot}
+\small
+
+\begin{table}[h]
+\centering
+\caption{Validated environments. Scene pipeline (UoS) and object sidecar (DreamLab).
+% SRC: report.md Appendix C; models-lane2/STATUS.md
+}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Component & Validated value \\
+\midrule
+Scene Python / Torch & 3.11 venv; Torch 2.11, CUDA 12.8 \\
+gsplat & 1.5.3 \\
+Laptop GPU & RTX 3060 Laptop, 6\,GB, compute 8.6 \\
+Workstation GPU & RTX 5090 class, 32\,GB (ship target sm\_120) \\
+COLMAP & Docker image \\
+Master splat & Full-SH 3DGS PLY; SHA-256 manifest \\
+\midrule
+Sidecar Python / Torch & nix py3.12; Torch 2.4.0 cu121 (Lane~B venv) \\
+Dev GPUs & RTX 6000 Ada (sm\_89) + A6000 (sm\_86), 48\,GB \\
+TRELLIS.2-4B weights & 16\,GB, symlinked from read-only mount \\
+VGGT smoke & 6 frames, 0.94\,s, 8.1\,GB peak (facebook/VGGT-1B, eval only) \\
+Sidecar test suite & 112 passed, 0 failed (not-slow) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section*{Appendix B: preservation package schema}
+\addcontentsline{toc}{section}{Appendix B: preservation package schema}
+% SRC: report.md Appendix B (lines 486-496)
+\begin{verbatim}
+archive/
+  originals/     untouched camera photographs and video
+  sfm/           cameras.txt, images.txt, points3D.txt, database.db
+  model/         scene.ply, full spherical harmonics
+  derivatives/   web splat, mesh, previews, objects/ (sidecar output)
+  manifest.json  versions, settings, metrics, SHA-256 fixity
+  README.md      plain-language context and verification instructions
+\end{verbatim}
+Manifest schema identifier \texttt{vitrine/preservation-package/1}; object records
+\texttt{vitrine/object/1}. Verification detects corruption or unintended change; it does not
+replace a backup and replication policy.
+
+\section*{Appendix C: ReconViaGen environment blockers}
+\addcontentsline{toc}{section}{Appendix C: ReconViaGen environment blockers}
+% SRC: models-lane2/STATUS.md §Blockers B1-B3
+\begin{itemize}
+\item \textbf{B1}: ReconViaGen \texttt{setup.sh} pins conda py3.10 + torch 2.4.0/cu121 with
+cp310 prebuilt wheels (flash-attn 2.7.0.post2, kaolin, xformers) and five source-compiled CUDA
+extensions (nvdiffrast, nvdiffrec, CuMesh, FlexGEMM, o-voxel); none install on the nix py3.12 venv.
+Recommended route: \texttt{uv}-managed standalone py3.10 (mechanism confirmed).
+\item \textbf{B2}: v0.5 ships only a Gradio demo (\texttt{app\_v05.py}), no headless CLI; an
+automated run needs a custom driver around \texttt{TrellisHybridPipeline} after B1.
+\item \textbf{B3}: 256\,MB tmpfs caches hit ENOSPC; resolved by redirecting HF/pip/TMP caches to
+the workspace disk.
+\end{itemize}

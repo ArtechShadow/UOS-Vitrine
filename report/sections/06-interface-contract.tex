@@ -1,0 +1,31 @@
+% SRC: report.md §7.5-7.7; ADR-001; DESIGN.md "uos-vitrine PR"; VALIDATION.md §1-2
+\section{Interface contract and the UoS PR}
+
+Data crosses the boundary as files, not imports. UoS exports a versioned handoff containing the
+authoritative scene-PLY hash, the registered staged images, the COLMAP text model, capture metadata,
+the coordinate convention, the parent archive-manifest hash and stable object requests. The sidecar
+validates the handoff and bypasses its own ingest, SfM and scene retraining. The original full-scene
+PLY stays byte-identical and authoritative; a cleaned derivative \texttt{scene\_cleaned.ply} may be
+produced by subtracting the exact union of accepted object selections, preserving selection indices,
+thresholds and before/after counts, with no inferred background fill by default. Cleaned scene and
+generated objects are engine derivatives linked to the master, not replacements for it.
+
+The UoS-side change is kept minimal and additive. \texttt{package.py} gains an optional
+\texttt{objects} manifest key and copies \texttt{runs/<name>/objects/} into
+\texttt{archive/derivatives/objects/}. \texttt{cli.py} gains a \texttt{vitrine objects} subcommand
+that invokes the sidecar as a subprocess. \texttt{serve.py} gains an optional read-only objects
+panel. No scene-mesh wiring ships in v1. The integration seam already exists and stands up: the
+sidecar venv imports uos-vitrine cleanly and the CLI exposes
+\texttt{doctor/\allowbreak ingest/\allowbreak sfm/\allowbreak train/\allowbreak package/\allowbreak objects/\allowbreak evaluate/\allowbreak verify/\allowbreak run}, with \texttt{objects} already
+shelling out to the sidecar.
+
+Validation surfaced one real cross-platform defect. \texttt{vitrine verify nested-cinema-04}
+re-checksums the manifest but rejects every file: the package was authored on Windows and
+\texttt{manifest.json} stores \texttt{originals\textbackslash <name>.jpg} with backslash separators,
+which the POSIX path-safety guard flags as an unsafe path. The packager should emit POSIX
+separators, or \texttt{verify} should normalise them before the safety check. This is filed for the
+UoS PR. Two pull requests are open against the UoS repository:
+\href{https://github.com/ArtechShadow/UOS-Vitrine/pull/1}{PR~\#1} (the sidecar hook: the
+\texttt{objects} subcommand and manifest key, three commits, 62 tests) and
+\href{https://github.com/ArtechShadow/UOS-Vitrine/pull/2}{PR~\#2} (an additive
+\texttt{composed\_scene} manifest field, stacked on PR~\#1).

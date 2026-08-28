@@ -1,0 +1,27 @@
+% SRC: report.md §5.3, §8; VALIDATION.md §4; nc04-object-pass1/REPORT.md; ADR-002/003
+\section{Limitations and negative results}
+
+Recording failure is part of the preservation method. The clearest scene-side negative result is the
+archive-profile opacity collapse (\S2): the 1600/4096 workstation-archive profile drives 98.7--99.8\%
+of the Gaussian population transparent and is quarantined as unvalidated. Omitting it would create the
+false impression that six million Gaussians are inherently superior; reporting the full matrix
+constrains future claims and keeps throughput capability distinct from reconstruction quality.
+
+On the object side, carve over-merges where one class tiles the scene. On the gallery golden set,
+per-label mask unions collapse wall-to-wall paintings into a few multi-million-Gaussian blobs that
+overlap one ground-truth object; individual instances are recovered only as smaller, sometimes
+fragmentary components. The fix is per-instance masks fed to carve separately, not per-label unions.
+Orientation remains the weakest emplacement axis: placement solves translation and scale from the
+carve subset reliably, but full orientation must be recovered from silhouettes and is marked
+\texttt{needs\_review} when under-constrained --- low-confidence placements must not be presented as
+validated assets, and generated backsides and occluded surfaces are labelled inferred.
+
+Further limits, stated plainly: a splat interpolates views, it does not measure surfaces, and COLMAP recovers
+arbitrary scale unless an external measurement establishes world units. Mirrors, screens, glass and
+polished metal are represented by observed pixels, not physical optics; moving screens are
+constitutive to the artwork and a static splat cannot preserve their temporal sequence. The live nc04
+pass leaves Camera~5's 4K walkthrough (120 frames) unused because only the \texttt{.MOV} shipped ---
+the densest trajectory is currently absent. GroundingDINO phrase-merging pollutes labels
+(``armchair chair'', ``radio typewriter''); it is cosmetic for carve but needs one prompt per detect
+call. And the reproj-IoU metric is a lower bound until a real gsplat rasteriser replaces the coarse
+point-splat silhouette.
