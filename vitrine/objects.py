@@ -187,6 +187,42 @@ def load_validated_objects(objects_dir: Path) -> list[dict[str, Any]]:
     return projected
 
 
+def load_validated_composed_scene(objects_dir: Path) -> dict[str, Any] | None:
+    """Validate an optional composed-scene reference in ``objects.json``.
+
+    Returns ``{"path", "sha256", "derivative_class"}`` with a **recomputed**
+    sha256, or ``None`` when absent. Raises :class:`ObjectManifestError` on a
+    malformed reference (unsafe/missing path or hash mismatch) — the same
+    trust-boundary rules as ``mesh_path``. A composed scene mixes observed and
+    generated content, so it is always classified ``composed-derivative``.
+    """
+    objects_dir = Path(objects_dir)
+    manifest = objects_dir / "objects.json"
+    if not manifest.is_file():
+        return None
+    try:
+        doc = json.loads(manifest.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    ref = doc.get("composed_scene") if isinstance(doc, dict) else None
+    if ref is None:
+        return None
+    if not isinstance(ref, dict):
+        raise ObjectManifestError("composed_scene must be an object")
+    rel = ref.get("path")
+    resolved = resolve_contained(rel, "composed_scene.path", objects_dir.resolve())
+    if not resolved.is_file() or resolved.is_symlink() or (objects_dir / rel).is_symlink():
+        raise ObjectManifestError(f"composed_scene.path is not a regular file: {rel!r}")
+    declared = ref.get("sha256")
+    if not isinstance(declared, str) or not _HEX64.match(declared.lower()):
+        raise ObjectManifestError("composed_scene.sha256 must be 64 hex characters")
+    actual = sha256_file(resolved)
+    if actual != declared.lower():
+        raise ObjectManifestError(
+            f"composed_scene.sha256 mismatch for {rel!r}: declared {declared}, actual {actual}")
+    return {"path": rel, "sha256": actual, "derivative_class": "composed-derivative"}
+
+
 def safe_copy_tree(src: Path, dest: Path) -> int:
     """Copy ``src`` → ``dest`` rejecting symlinks and non-regular files.
 
