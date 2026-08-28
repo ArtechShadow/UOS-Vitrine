@@ -104,11 +104,24 @@ views) at \SI{16.6}{\giga\byte}; both textured GLBs are $\approx$17\,MB. Every v
 32\,GB ceiling, Lane~A with roughly $3.5\times$ headroom.
 
 A first \texttt{composed\_scene.glb} exists for the radio, placing the Lane-A and Lane-B assets
-into the scene at solved transforms under an explicit basis contract. Each object carries
+into the scene at solved transforms under an explicit basis contract (Figure~\ref{fig:composed}). Each object carries
 provenance classes in \texttt{composed\_scene\_objects.json}: \texttt{geometry\_class=generated},
 \texttt{material\_class=generated}, \texttt{placement\_class=carve-init}, and
 \texttt{derivative\_class=composed-derivative}, so the placement is marked as carve-centroid
 initialised, not yet silhouette-refined.
+
+\begin{figure*}[t]
+\centering
+% SRC: runs/nc04-generate-pass1/radio/composed_proof/*.png (sidecar compose stage, real nc04 cameras)
+\includegraphics[width=0.98\textwidth]{renders/composed_proof.png}
+\caption{Composed-scene proof: the generated radio placed back into the real Nested Cinema 04
+room and rendered from two real COLMAP cameras. Green is the Lane-A (TRELLIS.2) silhouette, blue the
+Lane-B (ReconViaGen) silhouette, composited over the real rectified frame at the solved placement.
+Placement is evidence-based but carve-centroid initialised (\texttt{placement\_class=carve-init}, yaw
+unrefined), so the overlay is roughly rather than precisely registered --- see the carve-contamination
+note in \S\ref{sec:eval-ranking}.}
+\label{fig:composed}
+\end{figure*}
 
 \begin{figure}[h]
 \centering

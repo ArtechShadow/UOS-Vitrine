@@ -40,9 +40,25 @@ Marker area $\propto$ carved Gaussians.}
 \end{figure}
 
 Resource cost across the bake-off is settled (Figure~\ref{fig:bakeoff}, \S\ref{sec:objgen}):
-every Lane-A and Lane-B variant clears the 32\,GB ceiling. Quality ranking is not. The nc04 numeric
-silhouette scores are not yet reliable, because the object-to-scene scale bracket was only just
-fixed by reading \texttt{scene\_scale} from the manifest and refined scoring is still running. Until
-it completes, visual contact sheets are the evidence of record and no numeric lane winner is
-claimed.\label{sec:eval-ranking} \todo{Quality-ranking chart: per-object silhouette IoU /
-masked-DINO across lanes, once refined scoring lands.}
+every Lane-A and Lane-B variant clears the 32\,GB ceiling. Quality ranking is not, and the reason is
+diagnosed.\label{sec:eval-ranking} The numeric silhouette scores stay low regardless of the
+scale/translation search because the pass-2 radio Gaussian subset has an extent of about
+$15.8\times3.1\times10.7$ units in a scene of scale 9.2 --- the carve has picked up wall and floor,
+not just the radio. The emplacement anchor (centroid and extent) is therefore unreliable, so absolute
+silhouette IoU cannot be trusted as a lane discriminator. This is an upstream carve/mask-sparsity
+problem, not a generator or placement bug: generation quality (the turntables, Figure~\ref{fig:turntables})
+is the clean signal, while placement precision awaits a cleaner carve. The per-camera contact sheet
+(Figure~\ref{fig:contact}) shows the consequence directly --- the candidate silhouette spills beyond
+the object on several views. Until a cleaner carve lands, the contact sheets are the evidence of record
+and no numeric lane winner is claimed. \todo{Quality-ranking chart: per-object silhouette IoU /
+masked-DINO across lanes, once the carve is de-contaminated and refined scoring lands.}
+
+\begin{figure}[h]
+\centering
+% SRC: runs/nc04-generate-pass1/radio/bakeoff_contact_sheets/radio_laneA_best.png (sidecar select stage)
+\includegraphics[width=\columnwidth]{renders/contact_radio_laneA.png}
+\caption{Per-camera evidence for the Lane-A radio: real frame, candidate silhouette (green) and
+absolute difference, across six real cameras. Where the green spills onto walls and furniture the
+carve has over-captured, which is why absolute silhouette IoU is not yet a reliable lane score.}
+\label{fig:contact}
+\end{figure}

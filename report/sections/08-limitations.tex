@@ -10,7 +10,10 @@ constrains future claims and keeps throughput capability distinct from reconstru
 On the object side, carve over-merges where one class tiles the scene. On the gallery golden set,
 per-label mask unions collapse wall-to-wall paintings into a few multi-million-Gaussian blobs that
 overlap one ground-truth object; individual instances are recovered only as smaller, sometimes
-fragmentary components. The fix is per-instance masks fed to carve separately, not per-label unions.
+fragmentary components. The fix is per-instance masks fed to carve separately, not per-label unions. The same fault has a scale consequence on nc04: the pass-2 radio subset spans roughly
+$15.8\times3.1\times10.7$ units against a scene scale of 9.2, i.e. it swallows wall and floor, so the
+carve centroid and extent are contaminated and object-to-scene placement stays approximate until the
+carve is cleaned.
 Orientation remains the weakest emplacement axis: placement solves translation and scale from the
 carve subset reliably, but full orientation must be recovered from silhouettes and is marked
 \texttt{needs\_review} when under-constrained --- low-confidence placements must not be presented as
