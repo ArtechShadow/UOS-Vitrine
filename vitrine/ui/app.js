@@ -16,6 +16,7 @@ const state = {
   doctor: null,
   profiles: null,
   advanced: false,
+  captureFiles: [],
 };
 
 let liveTimer = null;
@@ -699,6 +700,159 @@ function renderMissionBoard(runs) {
     </section>`;
 }
 
+/* ---------- create a splat ---------- */
+
+function renderCreate() {
+  const adv = isAdv();
+  viewEl.innerHTML = `
+    <div class="create-shell">
+      <header class="create-intro">
+        <p class="page-kicker">New preservation capture</p>
+        <h2>Create a splat</h2>
+        <p>Bring photographs and video of one space together. Vitrine keeps the media local, maps the camera positions, and builds an explorable 3D archive.</p>
+      </header>
+
+      <form id="capture-form" class="capture-form">
+        <div class="capture-fields">
+          <label>
+            <span>Archive title</span>
+            <input id="capture-title" name="title" required maxlength="120" placeholder="e.g. Nested Cinema — final installation"/>
+          </label>
+          <label>
+            <span>What is being preserved?</span>
+            <textarea id="capture-subject" name="subject" rows="3" placeholder="A short description for the preservation record"></textarea>
+          </label>
+          <label>
+            <span>Build quality</span>
+            <select id="capture-quality" name="quality">
+              <option value="draft">Draft — quickest camera and coverage check</option>
+              <option value="standard" selected>Standard — measured everyday quality</option>
+              <option value="archive">Archive — longest, use after validating coverage</option>
+            </select>
+          </label>
+          <div class="capture-note">
+            <strong>Local from start to finish</strong>
+            <span>Files are copied into this archive on this workstation. Nothing is uploaded to a cloud service.</span>
+          </div>
+        </div>
+
+        <div class="capture-tray" id="capture-tray">
+          <input id="capture-files" name="files" type="file" multiple required
+            accept="image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif,video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska"/>
+          <div class="capture-tray-mark" aria-hidden="true">
+            <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5"/></svg>
+          </div>
+          <strong>Drop photographs or video here</strong>
+          <span>or choose files from this computer</span>
+          <button type="button" class="soft" id="btn-choose-media">Choose media</button>
+          <small>JPG, PNG, HEIC, TIFF, WebP · MP4, MOV, M4V, AVI, MKV</small>
+        </div>
+
+        <div id="capture-selection" class="capture-selection hidden" aria-live="polite"></div>
+        <div id="capture-progress" class="capture-progress hidden" aria-live="polite">
+          <div><span id="capture-progress-label">Copying media…</span><b id="capture-progress-value">0%</b></div>
+          <progress id="capture-progress-bar" max="100" value="0"></progress>
+        </div>
+        <div id="capture-result" class="capture-result hidden" role="status"></div>
+
+        <div class="capture-actions">
+          <p>${adv ? "Starts vitrine run: ingest → sfm → train → package." : "You can leave this page once processing starts; progress will appear in the Library."}</p>
+          <button type="submit" class="primary" id="btn-create-splat" disabled>Create splat</button>
+        </div>
+      </form>
+    </div>`;
+
+  const input = $("#capture-files");
+  const tray = $("#capture-tray");
+  const choose = $("#btn-choose-media");
+  const form = $("#capture-form");
+  const submit = $("#btn-create-splat");
+
+  const setFiles = (files) => {
+    state.captureFiles = Array.from(files || []);
+    const selection = $("#capture-selection");
+    if (!state.captureFiles.length) {
+      selection.classList.add("hidden");
+      submit.disabled = true;
+      return;
+    }
+    const total = state.captureFiles.reduce((sum, file) => sum + file.size, 0);
+    const images = state.captureFiles.filter((file) => file.type.startsWith("image/")).length;
+    const videos = state.captureFiles.filter((file) => file.type.startsWith("video/")).length;
+    selection.innerHTML = `
+      <div><strong>${fmt(state.captureFiles.length)} files ready</strong><span>${fmtBytes(total)}</span></div>
+      <p>${images ? `${fmt(images)} photograph${images === 1 ? "" : "s"}` : ""}${images && videos ? " · " : ""}${videos ? `${fmt(videos)} video${videos === 1 ? "" : "s"}` : ""}</p>`;
+    selection.classList.remove("hidden");
+    submit.disabled = false;
+  };
+
+  choose.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => setFiles(input.files));
+  ["dragenter", "dragover"].forEach((name) => tray.addEventListener(name, (event) => {
+    event.preventDefault();
+    tray.classList.add("dragging");
+  }));
+  ["dragleave", "drop"].forEach((name) => tray.addEventListener(name, (event) => {
+    event.preventDefault();
+    tray.classList.remove("dragging");
+  }));
+  tray.addEventListener("drop", (event) => setFiles(event.dataTransfer.files));
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!state.captureFiles.length || !form.reportValidity()) return;
+    const data = new FormData();
+    data.append("title", $("#capture-title").value);
+    data.append("subject", $("#capture-subject").value);
+    data.append("quality", $("#capture-quality").value);
+    state.captureFiles.forEach((file) => data.append("files", file, file.name));
+
+    const progress = $("#capture-progress");
+    const bar = $("#capture-progress-bar");
+    const value = $("#capture-progress-value");
+    const result = $("#capture-result");
+    progress.classList.remove("hidden");
+    result.classList.add("hidden");
+    submit.disabled = true;
+    submit.textContent = "Starting…";
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/captures");
+    xhr.upload.addEventListener("progress", (upload) => {
+      if (!upload.lengthComputable) return;
+      const pct = Math.round((100 * upload.loaded) / upload.total);
+      bar.value = pct;
+      value.textContent = `${pct}%`;
+    });
+    xhr.addEventListener("load", async () => {
+      let payload = {};
+      try { payload = JSON.parse(xhr.responseText || "{}"); } catch { /* response handled below */ }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        result.innerHTML = `<strong>Could not start this capture</strong><span>${escapeHtml(payload.error || `Server returned ${xhr.status}`)}</span>`;
+        result.className = "capture-result error";
+        submit.disabled = false;
+        submit.textContent = "Create splat";
+        return;
+      }
+      bar.value = 100;
+      value.textContent = "100%";
+      $("#capture-progress-label").textContent = "Media copied";
+      result.innerHTML = `<strong>Processing has started</strong><span>${escapeHtml(payload.title)} is now preparing photographs. You can follow it in the Library.</span><button type="button" class="soft" id="btn-open-new-run">Open Library</button>`;
+      result.className = "capture-result success";
+      submit.textContent = "Started";
+      await loadRuns(false);
+      $("#btn-open-new-run")?.addEventListener("click", () => switchView("runs"));
+    });
+    xhr.addEventListener("error", () => {
+      result.innerHTML = "<strong>Connection interrupted</strong><span>The media stayed on this computer. Try again.</span>";
+      result.className = "capture-result error";
+      submit.disabled = false;
+      submit.textContent = "Create splat";
+    });
+    xhr.send(data);
+  });
+}
+
 /* ---------- library / runs list ---------- */
 
 function teamsPanelHtml() {
@@ -886,6 +1040,7 @@ function renderRunsList() {
 
 async function openRun(name) {
   state.view = "run";
+  document.body.classList.add("run-workspace-active");
   setNav(null);
   stopLivePoll();
   viewEl.innerHTML = `<div class="loading">${isAdv() ? `Loading ${escapeHtml(name)}…` : "Opening archive…"}</div>`;
@@ -1224,7 +1379,9 @@ function renderRunDetail(run) {
             : `<span class="tip" data-tip="Estimated electricity used while building the 3D model, sampled from live GPU power draw, at your configured £/kWh rate (VITRINE_ELECTRICITY_RATE_GBP).">Electricity cost</span>`
         }</h3>
         <div class="metric sm">${h.cost_gbp != null ? "£" + fmt(h.cost_gbp, 2) : "—"}</div>
-        <div class="metric-label">${h.energy_kwh != null ? `${fmt(h.energy_kwh, 2)} kWh` : adv ? "—" : "Not measured yet"}</div>
+        <div class="metric-label">${h.energy_kwh != null
+          ? `${fmt(h.energy_kwh, 2)} kWh${h.electricity_rate_gbp_per_kwh != null ? ` · ${fmt(h.electricity_rate_gbp_per_kwh * 100, 2)}p/kWh` : ""}`
+          : adv ? "—" : "Not measured yet"}</div>
       </div>
     </div>
 
@@ -1349,8 +1506,29 @@ function renderRunDetail(run) {
     }
   `;
 
+  if (run.has_viewer) {
+    const viewer = viewEl.querySelector(":scope > .viewer-card");
+    if (viewer) {
+      const live = viewEl.querySelector(":scope > .live-banner");
+      const workspace = document.createElement("div");
+      const infoColumn = document.createElement("section");
+      const viewerColumn = document.createElement("aside");
+      workspace.className = "run-detail-workspace";
+      infoColumn.className = "run-info-column";
+      viewerColumn.className = "run-viewer-column";
+      viewerColumn.setAttribute("aria-label", "Interactive splat viewer");
+      Array.from(viewEl.children).forEach((child) => {
+        if (child !== live && child !== viewer) infoColumn.appendChild(child);
+      });
+      viewerColumn.appendChild(viewer);
+      workspace.append(infoColumn, viewerColumn);
+      viewEl.appendChild(workspace);
+    }
+  }
+
   $("#btn-back")?.addEventListener("click", () => {
     stopLivePoll();
+    document.body.classList.remove("run-workspace-active");
     state.view = "runs";
     state.selected = null;
     setNav("runs");
@@ -1764,10 +1942,13 @@ function setNav(active) {
 
 async function switchView(name) {
   stopLivePoll();
+  document.body.classList.remove("run-workspace-active");
   state.view = name;
   setNav(name);
   showFlash(null);
-  if (name === "runs") {
+  if (name === "create") {
+    renderCreate();
+  } else if (name === "runs") {
     await loadRuns(false);
     renderRunsList();
   } else if (name === "doctor") {

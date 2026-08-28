@@ -20,6 +20,7 @@ reference/
 tmp/
 output/
 report/
+.playwright-cli/
 
 # Funding-bid, pitch, and cross-partner strategy material — internal only.
 docs/ai-cop-bid-v3.md

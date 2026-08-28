@@ -97,7 +97,7 @@ this session's edits are recoverable.
 
 ### `train.py` — energy tracking + the quality-fix attempts
 - **Energy/cost:** samples `nvidia-smi` power draw every 500 steps, integrates
-  to kWh, ×`VITRINE_ELECTRICITY_RATE_GBP` (default 0.2703 £/kWh UK cap). In
+  to kWh, ×`VITRINE_ELECTRICITY_RATE_GBP` (default 0.2611 £/kWh UK average). In
   `progress.json`, `train.json`, and a new UI "Electricity cost" card.
 - **Opacity instrumentation:** the step log line now prints `mean_op` and
   `alive %` (fraction of Gaussians with sigmoid(opacity) > 0.005). **This is

@@ -190,12 +190,19 @@ python -m vitrine --run-dir runs/my-capture package --title "..." --subject "...
 python -m vitrine ui --open
 ```
 
-Opens `http://127.0.0.1:8765/` — stage status, PSNR/SSIM history, ingest
-samples, logs, and a splat viewer over everything in `runs/`.
+Opens `http://127.0.0.1:8765/`. The **Create a splat** screen accepts local
+photographs and video, starts the existing ingest → COLMAP → training →
+packaging pipeline, and keeps the capture on the workstation. Standard quality
+is the safe default; progress appears in the Library while the build runs.
 
-<p align="center">
-  <img src="branding/dashboard/hero.png" alt="Vitrine dashboard — nested-cinema-01 run, 25.72 dB / 0.817 SSIM, splat preview" width="820">
-</p>
+| Create from photographs or video | Inspect the archive beside the live viewer |
+|---|---|
+| ![Vitrine Create a splat screen with local image and video upload](docs/images/vitrine-create-splat.png) | ![Vitrine three-column archive workspace with menu, run information and interactive viewer](docs/images/vitrine-archive-workspace.png) |
+
+The archive workspace keeps the menu, measured run information, and viewer in
+separate columns. Open the viewer full-screen to walk through the splat.
+
+![Full-screen interactive Gaussian splat viewer showing the Nested Cinema installation](docs/images/vitrine-interactive-viewer.png)
 
 ### Checking a package later
 
@@ -220,6 +227,19 @@ runs/<name>/
 Quality is **measured, not asserted**: every 8th view is held out of training
 and the final PSNR and SSIM against those unseen views are recorded in
 `model/train.json` and in the package manifest.
+
+### Nested Cinema output
+
+The current master registers **736 views across five calibrated cameras** and
+retains **404,570 sparse COLMAP points** as reconstruction evidence. The
+visuals below are generated from that real text model, including the recovered
+camera centres and per-camera coverage—not from a synthetic example.
+
+![Photograph and reconstructed holdout view from the Nested Cinema master](docs/images/nested-cinema-photo-vs-reconstruction.png)
+
+| Registered sparse point cloud | COLMAP camera coverage, top view |
+|---|---|
+| ![Nested Cinema RGB COLMAP sparse point cloud with registered camera positions](docs/images/nested-cinema-colmap-point-cloud.png) | ![Top view of Nested Cinema COLMAP camera positions grouped by five camera models](docs/images/nested-cinema-colmap-camera-coverage.png) |
 
 ## Documentation
 

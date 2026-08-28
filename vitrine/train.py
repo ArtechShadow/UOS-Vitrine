@@ -177,10 +177,10 @@ MAX_SCALE_FRACTION = 0.25
 #: Empty disables the study. See the ``export clamp`` lines in the log.
 EXPORT_CLAMP_STUDY: tuple[float, ...] = ()
 
-#: UK domestic price-cap unit rate as of writing — not a live lookup, and this
+#: UK average electricity unit rate supplied for reporting — not a live lookup, and this
 #: run's actual tariff may differ. Override with the VITRINE_ELECTRICITY_RATE_GBP
 #: env var rather than editing this if your tariff is known and different.
-DEFAULT_ELECTRICITY_RATE_GBP_PER_KWH = 0.2703
+DEFAULT_ELECTRICITY_RATE_GBP_PER_KWH = 0.2611
 
 
 def electricity_rate_gbp_per_kwh() -> float:

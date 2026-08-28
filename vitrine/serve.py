@@ -1,8 +1,8 @@
-"""Local web UI for inspecting runs that already exist on disk.
+"""Local web UI for creating captures and inspecting runs on disk.
 
 Surfaces what the pipeline has produced — stage reports, metrics, artefacts,
-and the interactive splat viewer — without reimplementing training. Heavy
-stages stay on the CLI; this is the inspection surface.
+and the interactive splat viewer. New image/video uploads start the existing
+CLI pipeline in a background process rather than reimplementing its stages.
 
 Start with::
 
@@ -12,11 +12,16 @@ Start with::
 
 from __future__ import annotations
 
+import cgi
 import json
 import logging
 import mimetypes
+import os
+import re
 import shutil
 import socket
+import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -39,6 +44,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # older than this is treated as an interrupted run, not live training — a
 # crashed/killed process leaves the file behind and must not read as "Building".
 PROGRESS_FRESH_SECONDS = 10 * 60
+
+UPLOAD_SUFFIXES = {
+    ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp",
+    ".heic", ".heif", ".mp4", ".mov", ".m4v", ".avi", ".mkv",
+}
+
+
+def _run_slug(value: str) -> str:
+    """Return a filesystem-safe run name derived from a human title."""
+    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    return slug[:64] or "new-capture"
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -183,6 +199,15 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
     train = status["stages"]["train"]["report"] or {}
     ingest = status["stages"]["ingest"]["report"] or {}
     sfm = status["stages"]["sfm"]["report"] or {}
+    from .train import electricity_rate_gbp_per_kwh
+
+    electricity_rate = electricity_rate_gbp_per_kwh()
+    energy_kwh = train.get("energy_kwh")
+    current_cost_gbp = (
+        round(float(energy_kwh) * electricity_rate, 2)
+        if energy_kwh is not None
+        else train.get("cost_gbp")
+    )
 
     artefacts = {
         "scene_ply": _file_info(run_dir / "model" / "scene.ply"),
@@ -254,8 +279,9 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
             "interrupted": interrupted,
             "step": train.get("step") if (running or interrupted) else None,
             "eta_minutes": train.get("eta_minutes") if running else None,
-            "energy_kwh": train.get("energy_kwh"),
-            "cost_gbp": train.get("cost_gbp"),
+            "energy_kwh": energy_kwh,
+            "cost_gbp": current_cost_gbp,
+            "electricity_rate_gbp_per_kwh": electricity_rate,
         },
         "artefacts": artefacts,
         "has_viewer": bool(artefacts["scene_splat"]),
@@ -411,6 +437,7 @@ class VitrineHandler(SimpleHTTPRequestHandler):
     # When set, only these run directory names appear in the library / detail APIs.
     # Disk is untouched — diagnostic runs stay under runs/.
     run_allowlist: set[str] | None = None
+    upload_lock = threading.Lock()
 
     def _visible(self, name: str) -> bool:
         if self.run_allowlist is None:
@@ -575,6 +602,104 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             return self._send_file(self.ui_dir / "viewer.html")
 
         return self._send_text("not found", status=404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        """Accept local capture media and start the existing CLI pipeline."""
+        parsed = urlparse(self.path)
+        if parsed.path != "/api/captures":
+            return self._send_json({"error": "unknown endpoint"}, status=404)
+
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.startswith("multipart/form-data"):
+            return self._send_json({"error": "multipart form data required"}, status=400)
+
+        try:
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE": content_type,
+                    "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+                },
+                keep_blank_values=True,
+            )
+            title = str(form.getfirst("title", "New capture")).strip() or "New capture"
+            subject = str(form.getfirst("subject", "Not recorded.")).strip() or "Not recorded."
+            quality = str(form.getfirst("quality", "standard")).strip().lower()
+            if quality not in profiles.QUALITY_LEVELS:
+                return self._send_json({"error": "invalid quality level"}, status=400)
+
+            uploads = form["files"] if "files" in form else []
+            if not isinstance(uploads, list):
+                uploads = [uploads]
+            uploads = [item for item in uploads if getattr(item, "filename", None)]
+            if not uploads:
+                return self._send_json({"error": "choose at least one image or video"}, status=400)
+
+            with self.upload_lock:
+                base = _run_slug(title)
+                name = base
+                suffix = 2
+                while (self.runs_root / name).exists():
+                    name = f"{base}-{suffix}"
+                    suffix += 1
+                run_dir = self.runs_root / name
+                source_dir = run_dir / "source"
+                source_dir.mkdir(parents=True, exist_ok=False)
+
+            saved: list[str] = []
+            for item in uploads:
+                original = Path(str(item.filename)).name
+                ext = Path(original).suffix.lower()
+                if ext not in UPLOAD_SUFFIXES:
+                    continue
+                stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(original).stem).strip(".-") or "media"
+                destination = source_dir / f"{stem[:100]}{ext}"
+                counter = 2
+                while destination.exists():
+                    destination = source_dir / f"{stem[:92]}-{counter}{ext}"
+                    counter += 1
+                with destination.open("wb") as out:
+                    shutil.copyfileobj(item.file, out, length=1024 * 1024)
+                saved.append(destination.name)
+
+            if not saved:
+                shutil.rmtree(run_dir, ignore_errors=True)
+                return self._send_json({"error": "no supported image or video files were selected"}, status=400)
+
+            command = [
+                sys.executable, "-m", "vitrine",
+                "--run-dir", str(run_dir),
+                "--quality", quality,
+                "run",
+                "--source", str(source_dir),
+                "--originals", str(source_dir),
+                "--title", title,
+                "--subject", subject,
+            ]
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            process = subprocess.Popen(
+                command,
+                cwd=self.project_root,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+                creationflags=creation_flags,
+            )
+            if self.run_allowlist is not None:
+                self.run_allowlist.add(name)
+            return self._send_json({
+                "ok": True,
+                "name": name,
+                "title": title,
+                "quality": quality,
+                "files": saved,
+                "process_id": process.pid,
+            }, status=202)
+        except (OSError, ValueError) as exc:
+            logger.exception("capture upload failed")
+            return self._send_json({"error": str(exc)}, status=500)
 
 
 def serve(
