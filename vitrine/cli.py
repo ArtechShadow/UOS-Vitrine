@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -210,8 +211,85 @@ def cmd_package(args: argparse.Namespace) -> int:
         ingest_report=load(run_dir / "ingest" / "ingest.json"),
         sfm_report=load(run_dir / "sfm" / "sfm.json"),
         profile=profiles.describe(profile),
+        objects_dir=run_dir / "objects",
     )
     print(f"\npackage: {result.file_count} files, {result.total_bytes / 2**30:.2f} GB → {result.root}")
+    return 0
+
+
+# Stable exit codes for `objects`, independent of the sidecar's own codes.
+_OBJECTS_UNCONFIGURED = 2
+_OBJECTS_INVALID_OUTPUT = 3
+_OBJECTS_LAUNCH_FAILED = 4
+_OBJECTS_SIDECAR_FAILED = 5
+
+
+def cmd_objects(args: argparse.Namespace) -> int:
+    """Run the external object-reconstruction sidecar over this run.
+
+    The sidecar is a *separate* project with its own environment and model
+    licences; we invoke it as a subprocess and never import it, so its
+    dependencies stay out of this MIT tree. It reads the run's registered
+    images, COLMAP poses and scene splat, and writes per-object assets plus an
+    ``objects.json`` (schema ``vitrine/object/1``) into ``<run-dir>/objects/``,
+    which ``package`` then folds into the preservation manifest.
+
+    The sidecar is given as an explicit executable plus argument list (no shell
+    parsing), so paths with spaces or backslashes work identically on Windows.
+    """
+    import shutil
+    import subprocess
+
+    from . import objects as objects_mod
+
+    run_dir = _run_dir(args)
+    sidecar = args.sidecar or os.environ.get("VITRINE_OBJECT_SIDECAR")
+    if not sidecar:
+        print(
+            "no object sidecar configured. Point --sidecar at its executable, or\n"
+            "set VITRINE_OBJECT_SIDECAR. Extra arguments (e.g. -m sidecar) go in\n"
+            "repeated --sidecar-arg. The sidecar is a separate install — see its README.",
+            file=sys.stderr,
+        )
+        return _OBJECTS_UNCONFIGURED
+
+    # Run into a fresh staging directory, validate, then publish atomically. This
+    # guarantees no stale files survive from a prior run and that a failed or
+    # invalid invocation never replaces good existing output.
+    out_dir = run_dir / "objects"
+    staging = run_dir / ".objects.staging"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    command = [sidecar, *(args.sidecar_arg or []), "--package", str(run_dir), "--out", str(staging)]
+    logger.info("objects: launching %r with %d arg(s)", sidecar, len(command) - 1)
+    try:
+        result = subprocess.run(command)
+    except OSError as exc:
+        logger.error("could not launch sidecar %r: %s", sidecar, exc)
+        shutil.rmtree(staging, ignore_errors=True)
+        return _OBJECTS_LAUNCH_FAILED
+    if result.returncode != 0:
+        logger.error("sidecar exited with status %d", result.returncode)
+        shutil.rmtree(staging, ignore_errors=True)
+        return _OBJECTS_SIDECAR_FAILED
+
+    # Exit zero is not enough: require a valid contract document before trusting
+    # the output, so a silent or partial run is reported as a failure here.
+    try:
+        records = objects_mod.load_validated_objects(staging)
+    except objects_mod.ObjectManifestError as exc:
+        logger.error("sidecar finished but its output is invalid: %s", exc)
+        shutil.rmtree(staging, ignore_errors=True)
+        return _OBJECTS_INVALID_OUTPUT
+
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    os.replace(staging, out_dir)
+
+    labels = ", ".join(rec["label"] for rec in records) or "none"
+    print(f"\nobjects: {len(records)} recovered — {labels}")
     return 0
 
 
@@ -315,6 +393,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_package.add_argument("--subject", default="Not recorded.")
     p_package.set_defaults(func=cmd_package)
 
+    p_objects = sub.add_parser("objects", help="run the external object-reconstruction sidecar")
+    p_objects.add_argument("--sidecar", default=None,
+                           help="sidecar executable (else $VITRINE_OBJECT_SIDECAR)")
+    p_objects.add_argument("--sidecar-arg", action="append", default=None, metavar="ARG",
+                           help="extra argument passed before --package/--out (repeatable)")
+    p_objects.set_defaults(func=cmd_objects)
+
     p_evaluate = sub.add_parser("evaluate", help="measure a trained splat, per camera group")
     p_evaluate.add_argument("--ply", default=None, help="defaults to <run-dir>/model/scene.ply")
     p_evaluate.set_defaults(func=cmd_evaluate)
@@ -351,7 +436,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     log_file = None
-    if args.command in {"ingest", "sfm", "train", "package", "run"}:
+    if args.command in {"ingest", "sfm", "train", "package", "run", "objects"}:
         log_file = Path(args.run_dir) / "logs" / "vitrine.log"
     _setup_logging(args.verbose, log_file)
     try:

@@ -193,6 +193,47 @@ def _list_image_samples(run_dir: Path, limit: int = 24) -> list[dict[str, str]]:
     return samples
 
 
+def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
+    """Read-only summary of the object sidecar's output, or ``None`` if absent.
+
+    Count, labels and a turntable thumbnail per object — enough for a small
+    dashboard panel without the server needing to understand the sidecar.
+    """
+    manifest = run_dir / "objects" / "objects.json"
+    doc = _read_json(manifest)
+    if not doc:
+        return None
+    from urllib.parse import quote
+
+    from .objects import safe_component
+
+    name = run_dir.name
+    records = doc.get("objects") if isinstance(doc, dict) else None
+    if not isinstance(records, list):
+        return None
+    items: list[dict[str, Any]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        oid = rec.get("object_id")
+        # A thumbnail is offered only for a safe, contained object id — never
+        # build a served path from an untrusted identifier.
+        thumb_url = None
+        if safe_component(oid):
+            thumb_rel = f"objects/{oid}/turntable/view_00.png"
+            candidate = (run_dir / thumb_rel).resolve()
+            if candidate.is_relative_to(run_dir.resolve()) and candidate.is_file():
+                thumb_url = f"/files/{quote(name)}/{quote(thumb_rel)}"
+        items.append({
+            "object_id": oid if safe_component(oid) else None,
+            "label": rec.get("label") if isinstance(rec.get("label"), str) else None,
+            "confidence": rec.get("confidence"),
+            "coverage": rec.get("coverage"),
+            "thumb_url": thumb_url,
+        })
+    return {"count": len(items), "objects": items}
+
+
 def _summarise_run(run_dir: Path) -> dict[str, Any]:
     name = run_dir.name
     status = _stage_status(run_dir)
@@ -284,6 +325,7 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
             "electricity_rate_gbp_per_kwh": electricity_rate,
         },
         "artefacts": artefacts,
+        "objects": _objects_summary(run_dir),
         "has_viewer": bool(artefacts["scene_splat"]),
         "viewer_url": f"/viewer/{name}" if artefacts["scene_splat"] else None,
         "splat_url": f"/files/{name}/model/scene.splat" if artefacts["scene_splat"] else None,
