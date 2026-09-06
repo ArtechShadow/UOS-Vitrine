@@ -24,12 +24,13 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import webbrowser
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import __version__, profiles
 
@@ -203,8 +204,6 @@ def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
     doc = _read_json(manifest)
     if not doc:
         return None
-    from urllib.parse import quote
-
     from .objects import safe_component
 
     name = run_dir.name
@@ -220,7 +219,9 @@ def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
         # build a served path from an untrusted identifier.
         thumb_url = None
         if safe_component(oid):
-            thumb_rel = f"objects/{oid}/turntable/view_00.png"
+            thumb_rel = f"objects/{oid}/preview.png"
+            if not _safe_file_under_run(run_dir, thumb_rel):
+                thumb_rel = f"objects/{oid}/turntable/view_00.png"
             candidate = (run_dir / thumb_rel).resolve()
             if candidate.is_relative_to(run_dir.resolve()) and candidate.is_file():
                 thumb_url = f"/files/{quote(name)}/{quote(thumb_rel)}"
@@ -229,14 +230,38 @@ def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
             "label": rec.get("label") if isinstance(rec.get("label"), str) else None,
             "confidence": rec.get("confidence"),
             "coverage": rec.get("coverage"),
+            "asset_type": "gaussian-splat" if rec.get("splat_path") else "mesh",
+            "splat_url": (
+                f"/files/{quote(name)}/objects/{quote(rec['splat_path'])}"
+                if isinstance(rec.get("splat_path"), str)
+                and rec["splat_path"].lower().endswith(".splat")
+                and _safe_file_under_run(run_dir, f"objects/{rec['splat_path']}") is not None
+                else None
+            ),
+            "viewer_url": (
+                f"/viewer/{quote(name)}?scene={quote('objects/' + rec['splat_path'], safe='')}&label={quote(str(rec.get('label', 'Object')))}"
+                if isinstance(rec.get("splat_path"), str)
+                and rec["splat_path"].lower().endswith(".splat")
+                and _safe_file_under_run(run_dir, f"objects/{rec['splat_path']}") is not None
+                else None
+            ),
             "thumb_url": thumb_url,
+            "thumb_kind": "source-crop" if thumb_url and thumb_rel.endswith("/preview.png") else "render",
+            "mesh_url": (
+                f"/files/{quote(name)}/objects/{quote(rec['mesh_path'])}"
+                if isinstance(rec.get("mesh_path"), str)
+                and _safe_file_under_run(run_dir, f"objects/{rec['mesh_path']}") is not None
+                else None
+            ),
+            "mesh_name": Path(rec["mesh_path"]).name
+            if isinstance(rec.get("mesh_path"), str) else None,
         })
     summary: dict[str, Any] = {"count": len(items), "objects": items}
     # optional composed-scene glb (all objects placed in one glTF scene)
     cs = doc.get("composed_scene") if isinstance(doc, dict) else None
     if isinstance(cs, dict) and safe_component(str(cs.get("path", "")).split("/")[0]):
         rel = cs["path"]
-        if (run_dir / "objects" / rel).is_file():
+        if isinstance(rel, str) and _safe_file_under_run(run_dir, f"objects/{rel}") is not None:
             summary["composed_scene"] = {
                 "url": f"/files/{quote(name)}/objects/{quote(rel)}",
                 "sha256": cs.get("sha256"),
@@ -245,8 +270,62 @@ def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
     return summary
 
 
+def _object_workflow(run_dir: Path, process: subprocess.Popen | None = None) -> dict[str, Any]:
+    """Truthful UI state for the optional external object-separation stage."""
+    model_files = []
+    for role, rel in (
+        ("Gaussian master", "model/scene.ply"),
+        ("Web splat", "model/scene.splat"),
+        ("Fused mesh", "model/mesh.ply"),
+        ("Fused mesh", "model/mesh.obj"),
+        ("Fused mesh", "model/mesh.glb"),
+    ):
+        info = _file_info(run_dir / rel)
+        if info:
+            model_files.append({
+                "role": role,
+                **info,
+                "url": f"/files/{quote(run_dir.name)}/{quote(rel)}",
+            })
+    running = process is not None and process.poll() is None
+    return {
+        "configured": bool(os.environ.get("VITRINE_OBJECT_SIDECAR")),
+        "ready": bool(model_files),
+        "running": running,
+        "returncode": None if process is None or running else process.returncode,
+        "inputs": model_files,
+        "outputs": _objects_summary(run_dir),
+        "log_url": f"/api/runs/{quote(run_dir.name)}/log?which=objects",
+    }
+
+
 def _summarise_run(run_dir: Path) -> dict[str, Any]:
     name = run_dir.name
+    samples = _list_image_samples(run_dir, limit=1)
+    # A reviewed registered viewpoint also provides an intentional library cover.
+    try:
+        viewpoints = json.loads((run_dir / "model" / "viewer-cameras.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        viewpoints = None
+    if isinstance(viewpoints, list) and viewpoints and isinstance(viewpoints[0], dict):
+        image_name = viewpoints[0].get("name")
+        if isinstance(image_name, str):
+            relative = f"ingest/images/{image_name}"
+            if _safe_file_under_run(run_dir, relative):
+                samples = [{"name": Path(image_name).name,
+                            "group": str(Path(image_name).parent),
+                            "url": f"/files/{quote(run_dir.name)}/{quote(relative, safe='/')}"}]
+    manifest = _read_json(run_dir / "archive" / "manifest.json") or {}
+    capture = _read_json(run_dir / "capture.json") or {}
+    label = _read_json(run_dir / "run-label.json") or {}
+    title = label.get("title") or manifest.get("title") or capture.get("title")
+    # A cover is a render of this model, never a source photograph presented as one.
+    hero = _safe_file_under_run(run_dir, "model/library-hero.jpg")
+    hero_record = _read_json(run_dir / "model" / "library-hero.json") or {}
+    model_path = run_dir / "model" / "scene.ply"
+    if hero and model_path.is_file() and hero_record.get("source_mtime_ns") == model_path.stat().st_mtime_ns:
+        samples = [{"name": "Splat preview", "kind": "splat-render",
+                    "url": f"/files/{quote(name)}/model/library-hero.jpg?v={hero.stat().st_mtime_ns}"}]
     status = _stage_status(run_dir)
     train = status["stages"]["train"]["report"] or {}
     ingest = status["stages"]["ingest"]["report"] or {}
@@ -270,8 +349,14 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
         "sfm_json": _file_info(run_dir / "sfm" / "sfm.json"),
         "sfm_log": _file_info(run_dir / "logs" / "vitrine.log") or _file_info(run_dir / "logs" / "sfm.log")
         or _file_info(run_dir / "sfm" / "colmap.log"),
-        "train_log": _file_info(run_dir / "logs" / "vitrine.log") or _file_info(run_dir / "logs" / "train-standard.log"),
+        "train_log": _file_info(run_dir / "logs" / "vitrine.log") or _file_info(run_dir / "logs" / "train-standard.log")
+        or _file_info(run_dir / "model" / "training.log"),
     }
+
+    # Export time is the available creation record for legacy models. Unlike
+    # directory/label mtimes, it is unchanged by rename, previews or packaging.
+    model_info = artefacts["scene_ply"] or artefacts["scene_splat"]
+    splat_created_mtime = model_info["mtime"] if model_info else None
 
     running = status["stages"]["train"]["running"]
     interrupted = status["stages"]["train"]["interrupted"]
@@ -280,6 +365,10 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
     # back to the most recent periodic eval in its history so headline cards
     # aren't blank for live *or* interrupted runs.
     last_eval = (train.get("history") or [{}])[-1] if (running or interrupted) else {}
+    evaluation = (status["stages"]["evaluate"]["report"] or {}) if not (running or interrupted) else {}
+    metric_source = "evaluation" if evaluation.get("overall_psnr") is not None else (
+        "export" if train.get("export_psnr") is not None else "training"
+    )
 
     # Best "last activity" stamp for the library list: prefer final model
     # artefacts, then stage reports, then the run directory itself.
@@ -308,9 +397,12 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
 
     return {
         "name": name,
+        "title": title if isinstance(title, str) and title.strip() else None,
+        "preview": samples[0] if samples else None,
         "path": str(run_dir.relative_to(PROJECT_ROOT)) if run_dir.is_relative_to(PROJECT_ROOT) else str(run_dir),
         "updated_mtime": updated_mtime,
         "updated_at": updated_at,
+        "splat_created_mtime": splat_created_mtime,
         "progress": status["progress"],
         "stages": status["stages"],
         "headline": {
@@ -321,8 +413,9 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
             "cameras": sfm.get("cameras"),
             "points": sfm.get("points"),
             "profile": train.get("profile"),
-            "psnr": train.get("final_psnr", last_eval.get("psnr")),
-            "ssim": train.get("final_ssim", last_eval.get("ssim")),
+            "psnr": evaluation.get("overall_psnr", train.get("export_psnr", train.get("final_psnr", last_eval.get("psnr")))),
+            "ssim": evaluation.get("overall_ssim", train.get("export_ssim", train.get("final_ssim", last_eval.get("ssim")))),
+            "metric_source": metric_source,
             "n_gaussians": train.get("n_gaussians"),
             "minutes": train.get("minutes", train.get("elapsed_minutes")),
             "peak_vram_gb": train.get("peak_vram_gb"),
@@ -357,7 +450,7 @@ def _list_runs(
         return []
     runs: list[dict[str, Any]] = []
     for path in sorted(runs_root.iterdir()):
-        if not path.is_dir():
+        if not path.is_dir() or path.name.startswith("."):
             continue
         if only is not None and path.name not in only:
             continue
@@ -367,12 +460,15 @@ def _list_runs(
             path / "sfm",
             path / "model",
             path / "archive",
+            path / "capture.json",
         )
         if not any(m.exists() for m in markers):
             continue
         runs.append(_summarise_run(path))
     # Most recently touched first (by train.json or dir mtime).
     def sort_key(r: dict[str, Any]) -> float:
+        if r.get("splat_created_mtime") is not None:
+            return float(r["splat_created_mtime"])
         art = r.get("artefacts") or {}
         for key in ("train_json", "scene_ply", "ingest_json", "checkpoint"):
             info = art.get(key)
@@ -491,6 +587,17 @@ class VitrineHandler(SimpleHTTPRequestHandler):
     # Disk is untouched — diagnostic runs stay under runs/.
     run_allowlist: set[str] | None = None
     upload_lock = threading.Lock()
+    object_lock = threading.Lock()
+    management_lock = threading.Lock()
+    object_processes: dict[str, subprocess.Popen] = {}
+    capture_processes: dict[str, subprocess.Popen] = {}
+
+    def _with_capture_job(self, run: dict[str, Any]) -> dict[str, Any]:
+        process = self.capture_processes.get(run["name"])
+        if process is not None:
+            code = process.poll()
+            run["capture_job"] = {"running": code is None, "returncode": code}
+        return run
 
     def _visible(self, name: str) -> bool:
         if self.run_allowlist is None:
@@ -540,7 +647,7 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             # Stream so multi-hundred-MB PLYs don't sit in RAM.
             shutil.copyfileobj(fh, self.wfile, length=1024 * 1024)
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             pass
         finally:
             fh.close()
@@ -580,9 +687,31 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                 "profiles": _profiles_payload(),
             })
 
+        if path == "/api/construction":
+            from .live_build import activity
+            return self._send_json(activity(self.runs_root))
+
+        if path.startswith("/api/construction-image/"):
+            from .live_build import construction_image
+            image = construction_image(self.runs_root, path[len("/api/construction-image/"):])
+            if image is None:
+                return self._send_json({"error": "snapshot not found"}, status=404)
+            return self._send_file(image)
+
+        if path == "/api/trash":
+            root = self.runs_root.resolve()
+            trash = (root / ".trash").resolve()
+            records = []
+            if trash.parent == root and trash.is_dir():
+                for folder in sorted(trash.iterdir()):
+                    name, separator, token = folder.name.rpartition("--")
+                    if folder.is_dir() and not folder.is_symlink() and separator and re.fullmatch(r"[0-9a-f]{32}", token):
+                        label = _read_json(folder / "run-label.json") or _read_json(folder / "capture.json") or {}
+                        records.append({"id": folder.name, "name": name, "title": label.get("title") or name})
+            return self._send_json({"runs": records})
         if path == "/api/runs":
             return self._send_json({
-                "runs": _list_runs(self.runs_root, only=self.run_allowlist),
+                "runs": [self._with_capture_job(run) for run in _list_runs(self.runs_root, only=self.run_allowlist)],
                 "filter": sorted(self.run_allowlist) if self.run_allowlist else None,
             })
 
@@ -596,7 +725,10 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             if run_dir is None:
                 return self._send_json({"error": "run not found"}, status=404)
             if len(parts) == 1:
-                detail = _summarise_run(run_dir)
+                detail = self._with_capture_job(_summarise_run(run_dir))
+                detail["object_workflow"] = _object_workflow(
+                    run_dir, self.object_processes.get(name)
+                )
                 detail["samples"] = _list_image_samples(run_dir)
                 # Include full reports for the detail pane (already in stages).
                 return self._send_json(detail)
@@ -605,15 +737,19 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                 which = (qs.get("which") or ["train"])[0]
                 candidates = {
                     "train": [
+                        run_dir / "capture.log",
+                        run_dir / "model" / "training.log",
                         run_dir / "logs" / "vitrine.log",
                         run_dir / "logs" / "train-standard.log",
                         run_dir / "logs" / "train.log",
                     ],
                     "sfm": [
+                        run_dir / "capture.log",
                         run_dir / "logs" / "vitrine.log",
                         run_dir / "logs" / "sfm.log",
                         run_dir / "sfm" / "colmap.log",
                     ],
+                    "objects": [run_dir / "logs" / "objects.log"],
                 }.get(which, [])
                 for cand in candidates:
                     if cand.is_file():
@@ -630,6 +766,9 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                             "tail": text,
                         })
                 return self._send_json({"error": f"no {which} log found"}, status=404)
+            if len(parts) == 2 and parts[1] == "objects":
+                process = self.object_processes.get(name)
+                return self._send_json(_object_workflow(run_dir, process))
             return self._send_json({"error": "unknown endpoint"}, status=404)
 
         if path.startswith("/files/"):
@@ -659,6 +798,124 @@ class VitrineHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         """Accept local capture media and start the existing CLI pipeline."""
         parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        if path.startswith("/api/runs/") and path.rsplit("/", 1)[-1] in {"rename", "trash"}:
+            action = path.rsplit("/", 1)[-1]
+            name = path[len("/api/runs/"):].rsplit("/", 1)[0]
+            if not self._visible(name):
+                return self._send_json({"error": "run not found"}, status=404)
+            run_dir = _safe_run_dir(self.runs_root, name)
+            root = self.runs_root.resolve()
+            if run_dir is None or run_dir.parent != root or name.startswith(".") or (self.runs_root / name).is_symlink():
+                return self._send_json({"error": "run not found"}, status=404)
+            if self.headers.get("Origin") and urlparse(self.headers["Origin"]).netloc != self.headers.get("Host"):
+                return self._send_json({"error": "local workspace request required"}, status=403)
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 4096 or self.headers.get_content_type() != "application/json":
+                    raise ValueError("Expected a small JSON request")
+                body = json.loads(self.rfile.read(length))
+                if not isinstance(body, dict):
+                    raise ValueError("Expected a JSON object")
+                with self.management_lock:
+                    if action == "rename":
+                        title = body.get("title")
+                        if not isinstance(title, str) or not title.strip() or len(title) > 160 or any(ord(c) < 32 for c in title):
+                            raise ValueError("Choose a name between 1 and 160 characters")
+                        temporary = run_dir / (".run-label-" + uuid.uuid4().hex + ".json")
+                        temporary.write_text(json.dumps({"title": title.strip()}, ensure_ascii=False), encoding="utf-8")
+                        os.replace(temporary, run_dir / "run-label.json")
+                        return self._send_json({"ok": True, "title": title.strip()})
+                    if body.get("confirm_name") != name:
+                        raise ValueError("Confirm the exact capture before removing it")
+                    processes = [self.capture_processes.get(name), self.object_processes.get(name)]
+                    if any(p is not None and p.poll() is None for p in processes) or _stage_status(run_dir)["stages"]["train"]["running"]:
+                        return self._send_json({"error": "This capture is processing. Wait for it to finish before removing it."}, status=409)
+                    trash = (root / ".trash").resolve()
+                    if trash.parent != root:
+                        raise ValueError("Trash must remain inside the runs folder")
+                    trash.mkdir(exist_ok=True)
+                    destination = trash / (name + "--" + uuid.uuid4().hex)
+                    # Both resolved paths are constrained to this workspace's runs folder.
+                    os.replace(run_dir, destination)
+                    return self._send_json({"ok": True, "trash_id": destination.name, "original_name": name})
+            except (ValueError, OSError) as exc:
+                return self._send_json({"error": str(exc)}, status=400)
+        if path.startswith("/api/trash/") and path.endswith("/restore"):
+            trash_id = path[len("/api/trash/"):-len("/restore")]
+            root = self.runs_root.resolve()
+            trash = (root / ".trash").resolve()
+            source = _safe_run_dir(trash, trash_id)
+            name, separator, token = trash_id.rpartition("--")
+            if (trash.parent != root or source is None or source.parent != trash or not separator
+                    or not re.fullmatch(r"[0-9a-f]{32}", token) or (trash / trash_id).is_symlink()):
+                return self._send_json({"error": "removed capture not found"}, status=404)
+            if self.headers.get("Origin") and urlparse(self.headers["Origin"]).netloc != self.headers.get("Host"):
+                return self._send_json({"error": "local workspace request required"}, status=403)
+            if self.headers.get_content_type() != "application/json":
+                return self._send_json({"error": "JSON request required"}, status=400)
+            destination = (root / name).resolve()
+            if destination.parent != root or name.startswith("."):
+                return self._send_json({"error": "invalid capture name"}, status=400)
+            with self.management_lock:
+                if destination.exists():
+                    return self._send_json({"error": "A capture already uses that folder name. Nothing was overwritten."}, status=409)
+                try:
+                    os.replace(source, destination)
+                    if self.run_allowlist is not None:
+                        self.run_allowlist.add(name)
+                    return self._send_json({"ok": True, "name": name})
+                except OSError as exc:
+                    return self._send_json({"error": str(exc)}, status=400)
+        if path.startswith("/api/runs/") and path.endswith("/objects"):
+            name = path[len("/api/runs/") : -len("/objects")].strip("/")
+            if not self._visible(name):
+                return self._send_json({"error": "run not found"}, status=404)
+            run_dir = _safe_run_dir(self.runs_root, name)
+            if run_dir is None:
+                return self._send_json({"error": "run not found"}, status=404)
+            workflow = _object_workflow(run_dir, self.object_processes.get(name))
+            if workflow["running"]:
+                return self._send_json({"error": "object separation is already running"}, status=409)
+            if not workflow["configured"]:
+                return self._send_json({
+                    "error": "Object sidecar is not configured. Set VITRINE_OBJECT_SIDECAR before starting the dashboard."
+                }, status=409)
+            if not workflow["ready"]:
+                return self._send_json({
+                    "error": "No 3D model output found. Train or export this run first."
+                }, status=409)
+            logs_dir = run_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            command = [
+                sys.executable, "-m", "vitrine", "--run-dir", str(run_dir), "objects",
+            ]
+            try:
+                sidecar_args = json.loads(os.environ.get("VITRINE_OBJECT_SIDECAR_ARGS_JSON", "[]"))
+                if not isinstance(sidecar_args, list) or any(not isinstance(arg, str) for arg in sidecar_args):
+                    raise ValueError("expected a JSON array of strings")
+            except (json.JSONDecodeError, ValueError) as exc:
+                return self._send_json({"error": f"Invalid sidecar argument configuration: {exc}"}, status=409)
+            command.extend(f"--sidecar-arg={arg}" for arg in sidecar_args)
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            try:
+                with self.object_lock, (logs_dir / "objects.log").open("ab") as log:
+                    current = self.object_processes.get(name)
+                    if current is not None and current.poll() is None:
+                        return self._send_json({"error": "object separation is already running"}, status=409)
+                    process = subprocess.Popen(
+                        command,
+                        cwd=self.project_root,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        creationflags=creation_flags,
+                    )
+                    self.object_processes[name] = process
+                return self._send_json({"ok": True, "process_id": process.pid}, status=202)
+            except OSError as exc:
+                logger.exception("object separation launch failed")
+                return self._send_json({"error": str(exc)}, status=500)
         if parsed.path != "/api/captures":
             return self._send_json({"error": "unknown endpoint"}, status=404)
 
@@ -732,14 +989,19 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                 "--subject", subject,
             ]
             creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-            process = subprocess.Popen(
-                command,
-                cwd=self.project_root,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
-                creationflags=creation_flags,
-            )
+            (run_dir / "capture.json").write_text(json.dumps({
+                "title": title, "subject": subject, "quality": quality, "files": saved,
+            }, indent=2), encoding="utf-8")
+            with (run_dir / "capture.log").open("ab") as capture_log:
+                process = subprocess.Popen(
+                    command,
+                    cwd=self.project_root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=capture_log,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creation_flags,
+                )
+            self.capture_processes[name] = process
             if self.run_allowlist is not None:
                 self.run_allowlist.add(name)
             return self._send_json({

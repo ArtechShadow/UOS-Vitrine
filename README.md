@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-orange.svg"></a>
-  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue.svg">
+  <img alt="Python 3.11 validated" src="https://img.shields.io/badge/python-3.11%20validated-blue.svg">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg">
   <img alt="GPU" src="https://img.shields.io/badge/NVIDIA-RTX%203060%20Laptop%20%E2%86%92%20RTX%205090-76b900.svg">
   <img alt="Status" src="https://img.shields.io/badge/status-active%20research-f07d1c.svg">
@@ -13,7 +13,7 @@
 <h1 align="center">Vitrine</h1>
 
 <p align="center">
-  <strong>A local, GUI-driven platform for scene reconstruction, object segmentation and reproducible 3D digital preservation.</strong>
+  <strong>Local scene reconstruction and reproducible 3D digital preservation, with an experimental object-sidecar workflow.</strong>
 </p>
 
 <p align="center">
@@ -31,21 +31,30 @@
 Vitrine is an open-source, local-first pipeline for preserving physical spaces,
 exhibitions and temporary installations as reproducible 3D records.
 
-It combines two connected workflows:
+The core workflow turns photographs and video into a measured 3D Gaussian
+Splat, with a local capture library and preservation packaging. An optional,
+separately installed object sidecar produces candidate assets for review.
+Object identity and clean separation are still experimental on the demo machine.
 
-1. **Scene reconstruction** — photographs and video are processed into a
-   measured 3D Gaussian Splat of the complete environment.
-2. **Object reconstruction** — an optional external sidecar can identify and
-   segment objects, reconstruct them as individual 3D assets and place them
-   back into a composed scene.
-
-The visual model is not treated as the complete result. A Vitrine archive can
-also contain original capture media, calibrated camera positions, COLMAP
-evidence, software versions, held-out quality measurements, reconstructed
-object meshes, provenance records and SHA-256 checksums.
+A preservation package can retain originals, calibrated camera positions,
+COLMAP evidence, software versions, model files and SHA-256 checksums.
+Evaluation and optional object derivatives must actually be present before
+claiming them as part of an individual archive.
 
 The result is a **digital twin of a moment**: not a live sensor system, but a
 reproducible record of a space that may later change or disappear.
+
+## Current status — 6 September 2026
+
+**AMBER: ready for a prepared-scene rehearsal; not yet signed off for the
+30 September demo.** The local viewer, full capture library, rename, recoverable
+Trash and measured video-only result are available. Clean object isolation,
+end-to-end upload recovery, final SpaceMouse tuning and venue rehearsal remain
+acceptance gates. See the [demo readiness report](docs/demo-readiness-2026-09-30.md).
+
+This assessment covers the current working tree, which contains uncommitted
+changes beyond `856dce1`; it is not a claim that a fresh checkout of that commit
+contains the demo features or installed sidecar.
 
 ## Designed for ease of use
 
@@ -62,12 +71,23 @@ for:
 - creating a reconstruction from local photographs and video;
 - choosing a suitable quality profile;
 - following processing progress and logs;
-- browsing completed and in-progress captures;
+- browsing all completed and in-progress captures, with search and filters;
+- renaming captures and moving them to recoverable Trash;
 - reviewing reconstruction statistics and quality measurements;
-- exploring Gaussian Splats in an interactive viewer;
-- viewing object summaries and links to reconstructed assets or composed scenes
-  when sidecar output is present;
+- exploring Gaussian Splats with saved viewpoints, reset and presentation mode;
+- connecting a SpaceMouse through WebHID, with speed and direction controls;
+- reviewing experimental object candidates and their actual 3D outputs;
 - inspecting archive contents and preservation metadata.
+
+The viewer libraries and UI fonts are bundled locally. Installation and initial
+model downloads require network access; a fresh offline venue rehearsal remains
+to be completed. SpaceMouse requires a WebHID-capable browser and device consent;
+physical movement now works, but the latest navigation tuning awaits acceptance.
+
+Rename changes a display label without rewriting archive metadata. Delete moves
+a capture into `runs/.trash`; restore refuses to overwrite another capture. Trash
+does not free disk space. Finish externally launched jobs before moving their
+run folders; the dashboard cannot track every external process.
 
 All processing remains on the local computer. The GUI is a user-friendly layer
 over the same reproducible pipeline; the CLI remains available for research,
@@ -76,6 +96,9 @@ automation and stage-by-stage control.
 | Create from photographs or video | Inspect the archive beside the live viewer |
 |---|---|
 | ![Vitrine Create a splat screen with local image and video upload](docs/images/vitrine-create-splat.png) | ![Vitrine archive workspace with run information and interactive viewer](docs/images/vitrine-archive-workspace.png) |
+
+These screenshots document an earlier interface revision; the current workspace
+uses the Images → 3D splat → Objects journey.
 
 ![Full-screen interactive Gaussian splat viewer showing the Nested Cinema installation](docs/images/vitrine-interactive-viewer.png)
 
@@ -102,9 +125,8 @@ test case for a larger question:
 | Multi-camera calibration | Keeps phones, lenses, resolutions and video sources correctly separated |
 | Lens correction | Corrects COLMAP camera distortion before splat training |
 | Measured quality | Evaluates unseen views using PSNR and SSIM |
-| Object identification and segmentation | Connects to an optional GroundingDINO and SAM3.1 sidecar |
-| Per-object reconstruction | Produces individual object candidates and GLB assets |
-| Scene composition | Places recovered objects into an exportable glTF scene |
+| Experimental object separation | Optional external sidecar; current Windows demonstration uses GroundingDINO and SAM2.1 |
+| Object asset handoff | Validates per-object mesh or Gaussian-splat records; validation does not establish visual correctness |
 | Provenance tracking | Distinguishes photographed evidence from inferred or generated surfaces |
 | Preservation packaging | Stores originals, poses, models, metadata, derivatives and checksums |
 | Laptop-to-workstation profiles | Runs from a 6 GB RTX 3060 Laptop to an RTX 5090 workstation |
@@ -120,8 +142,8 @@ flowchart TB
     scene --> archive["Preservation package"]
     scene --> sidecar["Optional object sidecar"]
     sidecar --> objects["Segment and reconstruct objects"]
-    objects --> compose["Place objects and compose scene"]
-    compose --> archive
+    objects --> review["Review identity and geometry"]
+    review --> archive
 ```
 
 Each expensive stage writes a compact report and can be repeated independently.
@@ -130,27 +152,57 @@ The complete scene pipeline is also reachable through one command:
 ```bash
 python -m vitrine doctor
 python -m vitrine profiles
-python -m vitrine run --run-dir runs/my-capture --quality standard
+python -m vitrine --run-dir runs/my-capture --quality standard run
 python -m vitrine ui --open
 ```
 
 ## Quick start
 
-Requires Python 3.11+, an NVIDIA GPU, `ffmpeg`, and Docker. COLMAP runs in a
-container on both supported platforms.
+Use **Python 3.11**, an NVIDIA GPU, `ffmpeg`, and Docker with GPU access.
+COLMAP runs in a container. The dashboard currently imports `cgi`, removed in
+Python 3.13, so the old blanket “Python 3.11+” compatibility claim was incorrect.
+CUDA compilation also needs a compatible host compiler: Visual Studio C++ Build
+Tools on Windows, or a CUDA-compatible GCC on Linux. See [AGENTS.md](AGENTS.md).
 
-```bash
+Windows PowerShell:
+
+```powershell
 git clone https://github.com/ArtechShadow/UOS-Vitrine.git
 cd UOS-Vitrine
+py -3.11 -m venv .venv
+.venv/Scripts/python.exe -m pip install -r requirements.txt
+docker pull colmap/colmap:latest
+.venv/Scripts/python.exe -m vitrine doctor
+.venv/Scripts/python.exe -m vitrine ui --open
+```
 
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+Linux, after cloning:
 
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 docker pull colmap/colmap:latest
 python -m vitrine doctor
 python -m vitrine ui --open
 ```
+
+Use the environment's Python for the commands below. Check the printed server
+address: if 8765 is occupied the dashboard can choose another port.
+
+For this prepared Windows demo workspace:
+
+```powershell
+# Full capture library; optional separator requires its separate installation.
+./scripts/start_demo.ps1
+# Focus a rehearsal on the master:
+./scripts/start_demo.ps1 -Run nested-cinema-04-master
+# Enable the locally installed experimental separator:
+./scripts/start_demo.ps1 -WithObjects
+```
+
+Do not start multiple servers unintentionally. The sidecar and raw captures are
+not included in a fresh checkout. See [sidecar setup](docs/sam2-object-sidecar-setup.md).
 
 Validated on Linux with an RTX 3060 Laptop GPU and Windows 11 with an RTX 5090.
 The reconstruction algorithm remains the same; hardware profiles change the
@@ -168,12 +220,14 @@ source/
 └── video/      walkthrough — fills gaps between stills
 ```
 
-Run the complete scene workflow:
+The following CLI syntax selects an explicit profile. Stock workstation profiles
+need further validation for this capture; see Quality profiles before training.
+Global options (`--run-dir`, `--quality`, `--tier`) precede the subcommand.
+
+Run ingest, SfM, training and packaging:
 
 ```bash
-python -m vitrine run \
-    --run-dir runs/my-capture \
-    --quality standard \
+python -m vitrine --run-dir runs/my-capture --quality standard run \
     --title "My Installation" \
     --subject "What was captured and why it matters."
 ```
@@ -183,12 +237,16 @@ Or work stage by stage:
 ```bash
 python -m vitrine --run-dir runs/my-capture ingest
 python -m vitrine --run-dir runs/my-capture sfm
-python -m vitrine --run-dir runs/my-capture train
+python -m vitrine --run-dir runs/my-capture --quality standard train
 python -m vitrine --run-dir runs/my-capture evaluate
 python -m vitrine --run-dir runs/my-capture package --title "..." --subject "..."
 ```
 
-Always make a `draft` while the subject still exists. It answers the most
+`run` does not invoke the separate `evaluate` command. Run evaluation explicitly
+and package again if the archive should include that report. Training metrics
+and saved-PLY evaluation are distinct records.
+
+Make an early registration check while the subject still exists. It answers the most
 important early question — whether the capture has enough overlap to register —
 before a temporary installation is dismantled.
 
@@ -204,69 +262,29 @@ python -m vitrine --run-dir runs/my-capture objects \
     --sidecar /path/to/object-sidecar
 ```
 
-The sidecar consumes a Vitrine run read-only and can:
+The configured executable must accept the core file-handoff contract; an arbitrary
+Python executable or an unadapted external module is not sufficient. Extra
+arguments use repeated `--sidecar-arg` options. The dashboard also accepts
+`VITRINE_OBJECT_SIDECAR` and `VITRINE_OBJECT_SIDECAR_ARGS_JSON`.
 
-- identify candidate objects with GroundingDINO prompts;
-- segment them per frame with SAM3.1;
-- rectify masks and images into an explicitly recorded camera domain;
-- carve coherent 3D object candidates using front-depth-band gating and
-  multi-view evidence;
-- choose photographic seed views by silhouette, sharpness and coverage;
-- generate alternative object reconstructions;
-- score candidates against real photographs, masks and recovered cameras;
-- estimate position, orientation and scale within the scene;
-- bake photographed detail onto observed texture regions;
-- record generated filling separately for surfaces that were never observed;
-- emit individual GLB assets and an optional composed glTF scene.
+The current Windows test uses public SAM2.1 as an alternative to the gated
+SAM3.1 checkpoint. Two real 40-frame passes produced six Gaussian subsets in
+54.53 and 51.74 seconds of pipeline time, excluding model loading and final
+export. These are **experimental candidates, not six verified isolated objects**:
+visual review found fragments and a source-crop/object mismatch. No generated
+GLB or composed-scene demonstration has been accepted on this workstation.
+See the [sidecar review](docs/demo-object-sidecar-review.md).
 
-The research harness has evaluated reconstruction lanes including
-**TRELLIS.2** and **ReconViaGen**. Current rankings are evidence for the tested
-Nested Cinema objects, not claims of universal model superiority.
+The [research closeout report](report/closeout-report.pdf) contains separate
+TRELLIS.2/ReconViaGen and composed-scene experiments from another environment.
+Those results should not be presented as reproduced Windows demo capabilities.
 
-### From photograph to reusable object
-
-The examples below show real seed photographs paired with Lane-A TRELLIS.2
-reconstructions of the radio, table and speaker, followed by turntable views
-from angles that were not present in the conditioning photograph.
-
-![Seed photographs paired with reconstructed radio, table and speaker assets](report/figures/renders/assets_pairs.png)
-
-![Turntable views of Lane-A reconstructed Nested Cinema objects](report/figures/renders/laneA_turntables.png)
-
-### Comparing reconstruction approaches
-
-Candidate selection is evidence-based. The radio comparison below places the
-Lane-A and Lane-B results side by side; the current instance-aware evaluation
-ranks Lane A first for this tested object, while retaining the limitations of
-single-object evidence.
-
-![Radio object reconstruction comparison between Lane A and Lane B](report/figures/renders/radio_bakeoff_AvB.png)
-
-### A secure file boundary
-
-The sidecar writes a versioned contract rather than importing code into the
-preservation pipeline:
-
-```text
-runs/<name>/objects/
-├── objects.json             schema: vitrine/object/1
-├── object meshes and previews
-└── optional composed scene
-```
-
-Before accepting output, Vitrine validates the schema, safe relative paths,
-mesh references, transforms, coverage and confidence values. Checksums are
-recomputed rather than trusted, and symlinks, traversal paths, duplicate IDs
-and malformed records are rejected.
-
-Validated assets are archived under `derivatives/objects/`. The preservation
-manifest records stable per-object metadata and labels the composed scene as a
-derivative that may combine observed and generated content.
-
-The composed-scene proof places reconstructed assets back into the recovered
-environment. It is presented as a derivative rather than raw capture evidence.
-
-![Composed scene containing reconstructed objects placed into the Nested Cinema environment](report/figures/renders/composed_proof.png)
+The sidecar writes `runs/<name>/objects/objects.json`, schema `vitrine/object/1`,
+plus referenced assets. The core validates paths, hashes and typed asset records
+before accepting them. Each object declares a mesh or a Gaussian splat; schema
+and checksum validation do not verify object identity or geometric accuracy.
+Optional accepted derivatives can be included when packaging. Existing archives
+are not automatically refreshed when new candidates are produced.
 
 ## Measured scene results
 
@@ -275,15 +293,26 @@ environment. It is presented as a derivative rather than raw capture evidence.
 | `nested-cinema-01` | RTX 3060 Laptop, 6 GB | 222 | 25.72 dB | 0.817 | 60.4 min |
 | `nested-cinema-01-5090-control` | RTX 5090 | 222 | 25.06 dB | 0.821 | **2.4 min** (~25×) |
 | `nested-cinema-04-master` | RTX 5090 | 736 | 22.91 dB | 0.778 | 8.7 min |
+| Video-only, appearance OFF | RTX 5090 | 200 (25 held out) | 31.007 dB | 0.946975 | 4.3 min training |
 
 The 5090 control reproduces the laptop recipe at approximately the same quality
 in a fraction of the time. The larger `nested-cinema-04-master` result is scored
 against a broader and more difficult held-out set spanning five camera groups,
 so its figures are not directly comparable with the 222-view baseline.
 
-Quality is measured rather than asserted: every eighth view is held out of
-training, and PSNR and SSIM are recorded against photographs the optimiser did
-not see.
+The first two rows are historical pre-undistortion results. Master figures are
+stored export metrics; it still lacks a separate canonical evaluation report.
+The video row scores the saved SH3 PLY, not the SH0 browser derivative. All times
+are training observations, not complete capture-to-archive turnaround.
+
+In the matched video test, turning appearance compensation off improved the
+saved PLY by **4.440 dB PSNR and 0.005743 SSIM**; it is now the training default.
+Ingest took 194.9 seconds and SfM 10.06 minutes before training. The video result
+has no preservation package yet. See [recipe, limitations and evidence](docs/demo-video-quality-20260906.md).
+
+Held-out views are excluded from photometric training, but contribute to SfM.
+Nearby video frames are correlated. Metrics from different captures/splits are
+not a direct quality ranking, and do not establish unseen-surface accuracy.
 
 ### Reconstruction evidence
 
@@ -324,13 +353,11 @@ The validated high-quality recipe uses a 2304-pixel source with a 1536-pixel
 crop (67% coverage). Full record:
 [`docs/nested-cinema-04-master.md`](docs/nested-cinema-04-master.md).
 
-### Object carving needs depth-aware evidence
+### Object carving needs visual acceptance
 
-Naively voting for every Gaussian along a masked camera ray contaminates an
-object with occluded geometry behind it. The current sidecar contract uses a
-front-depth band, multi-view thresholds and connected-component cleanup. The
-latest Nested Cinema radio test reduced the carve to a clean 2,093-Gaussian
-cluster after correcting an outlier-inflated depth band.
+Depth gating and multi-view votes can still include surrounding geometry or the
+wrong nearby object. The Windows candidate review remains below the acceptance
+threshold for clean object separation; high vote confidence is not accuracy.
 
 ## Quality profiles
 
@@ -338,17 +365,22 @@ cluster after correcting an outlier-inflated depth band.
 python -m vitrine profiles
 ```
 
-| | draft | standard | archive |
-|---|---|---|---|
-| Purpose | Check capture registration | Reliable working result | Deposit-oriented testing |
-| Laptop, 6 GB | ~3 min | ~40 min | ~110 min |
-| Workstation, 24–32 GB | ~3 min | ~60 min | ~275 min estimated |
+This prints the shipped settings and **estimates**, not guaranteed processing
+times. The CLI defaults to `archive` when no quality is supplied.
 
-> **Known gap:** the workstation `archive` preset (`crop=1600`,
-> `source_long_edge=4096`) remains unvalidated and can suffer opacity collapse.
-> Use `standard`, or reproduce the best measured high-quality result with
-> [`scripts/run_nested_cinema_04_master.py`](scripts/run_nested_cinema_04_master.py),
-> until the profile is revalidated.
+The stock workstation source/crop pairs are draft 2048/800, standard 3200/1280
+and archive 4096/1600. Each has a nominal crop-to-long-edge ratio below 0.5;
+actual sampled area depends on image dimensions. Do not treat stock `standard`
+as a validated equivalent of the successful HQ experiment. The workstation
+Archive preset remains explicitly unvalidated; no profiles were changed by this
+documentation audit.
+
+The measured HQ recipe uses source 2304 / crop 1536. The existing
+[master script](scripts/run_nested_cinema_04_master.py) is capture-specific and
+reuses known poses; it is not a generic new-capture command. The
+[video experiment](docs/demo-video-quality-20260906.md) records its own fresh
+registration and reproducible comparison. Use prepared, reviewed outputs for
+the presentation until the chosen new-capture profile is rehearsed.
 
 ## What comes out
 
@@ -409,7 +441,10 @@ information, not an implementation detail.
 | [`docs/nested-cinema-04-master.md`](docs/nested-cinema-04-master.md) | Full record behind the current scene result |
 | [`docs/PROJECT-PLAN.md`](docs/PROJECT-PLAN.md) | Roadmap and module status |
 | [`docs/progress.md`](docs/progress.md) | Backward-looking implementation record |
-| [`report/closeout-report.pdf`](report/closeout-report.pdf) | Scene and object reconstruction closeout report |
+| [`docs/demo-readiness-2026-09-30.md`](docs/demo-readiness-2026-09-30.md) | Current demo status, evidence, gaps and rehearsal plan |
+| [`docs/demo-ui-review.md`](docs/demo-ui-review.md) | UI, capture management and device acceptance record |
+| [`docs/demo-video-quality-20260906.md`](docs/demo-video-quality-20260906.md) | Matched video-only saved-PLY quality experiment |
+| [`report/closeout-report.pdf`](report/closeout-report.pdf) | Research closeout; separate environment and acceptance limits |
 
 ## Project boundaries and collaboration
 

@@ -1,4 +1,5 @@
 /** Vitrine local archive UI — simple (academic) or advanced (technical) view. */
+import { renderStudioLibrary, renderStudioDetail } from './studio.js';
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const viewEl = $("#view");
@@ -147,7 +148,7 @@ const ARTEFACT = {
 const QUALITY_BLURB = {
   draft: "A quick preview — useful while testing a capture, not for deposit.",
   standard: "Balanced quality for everyday review and most presentations.",
-  archive: "Highest detail — preferred when the space will be formally preserved.",
+  archive: "Experimental on workstations: validate crop coverage and reconstruction quality before use. Archive packaging is available independently of build quality.",
 };
 
 /** Pipeline goals — what each stage is for (simple + advanced wording). */
@@ -265,25 +266,9 @@ function profileLabel(profile) {
   return isAdv() ? String(profile) : friendlyProfile(profile);
 }
 
-/** Format run updated_at / mtime for library cards. Returns { date, time, full } or null. */
+/** Format the saved splat creation/export time. Returns { date, time, full } or null. */
 function formatArchiveWhen(run) {
-  let ms = null;
-  if (run?.updated_mtime != null) {
-    ms = Number(run.updated_mtime) * 1000;
-  } else if (run?.updated_at) {
-    // Server sends local wall time without TZ; parse as local by replacing T.
-    const d = new Date(String(run.updated_at).replace(" ", "T"));
-    if (!Number.isNaN(d.getTime())) ms = d.getTime();
-  }
-  if (ms == null || Number.isNaN(ms)) {
-    // Fall back to newest artefact mtime if API is older mid-reload.
-    const arts = run?.artefacts || {};
-    let best = 0;
-    for (const info of Object.values(arts)) {
-      if (info?.mtime && info.mtime > best) best = info.mtime;
-    }
-    if (best) ms = best * 1000;
-  }
+  const ms = run?.splat_created_mtime != null ? Number(run.splat_created_mtime) * 1000 : null;
   if (ms == null || Number.isNaN(ms)) return null;
   const d = new Date(ms);
   const date = d.toLocaleDateString(undefined, {
@@ -303,18 +288,18 @@ function formatArchiveWhen(run) {
 function archiveWhenHtml(run, { compact = false } = {}) {
   const when = formatArchiveWhen(run);
   if (!when) return "";
-  const label = isAdv() ? "updated" : "Archived";
+  const label = "Splat created";
   if (compact) {
     return `<div class="archive-when" title="${escapeHtml(when.full)}">
       <span class="archive-when-label">${label}</span>
-      <time datetime="${escapeHtml(run.updated_at || "")}">${escapeHtml(when.date)}</time>
+      <time datetime="${escapeHtml(new Date(when.ms).toISOString())}">${escapeHtml(when.date)}</time>
       <span class="archive-when-sep" aria-hidden="true">·</span>
       <span class="archive-when-time mono">${escapeHtml(when.time)}</span>
     </div>`;
   }
   return `<div class="archive-when" title="${escapeHtml(when.full)}">
     <span class="archive-when-label">${label}</span>
-    <time datetime="${escapeHtml(run.updated_at || "")}">${escapeHtml(when.date)}</time>
+    <time datetime="${escapeHtml(new Date(when.ms).toISOString())}">${escapeHtml(when.date)}</time>
     <span class="archive-when-sep" aria-hidden="true">at</span>
     <span class="archive-when-time mono">${escapeHtml(when.time)}</span>
   </div>`;
@@ -704,18 +689,21 @@ function renderMissionBoard(runs) {
 
 function renderCreate() {
   const adv = isAdv();
+  (state.capturePreviewUrls || []).forEach(url => URL.revokeObjectURL(url));
+  state.capturePreviewUrls = [];
   viewEl.innerHTML = `
     <div class="create-shell">
       <header class="create-intro">
-        <p class="page-kicker">New preservation capture</p>
-        <h2>Create a splat</h2>
-        <p>Bring photographs and video of one space together. Vitrine keeps the media local, maps the camera positions, and builds an explorable 3D archive.</p>
+        <p class="page-kicker">01 / Images</p>
+        <h2>Start with a space.</h2>
+        <p>Add overlapping photographs or a video of one place. Give your capture a name, then build its 3D splat.</p>
       </header>
+      <div class="studio-process" aria-label="Capture workflow"><div><span>01</span><strong>Add images</strong><small>Choose your source material</small></div><div><span>02</span><strong>Build a 3D splat</strong><small>Map cameras and reconstruct</small></div><div><span>03</span><strong>Separate objects</strong><small>Review with a connected sidecar</small></div></div>
 
       <form id="capture-form" class="capture-form">
         <div class="capture-fields">
           <label>
-            <span>Archive title</span>
+            <span>Capture title</span>
             <input id="capture-title" name="title" required maxlength="120" placeholder="e.g. Nested Cinema — final installation"/>
           </label>
           <label>
@@ -726,18 +714,19 @@ function renderCreate() {
             <span>Build quality</span>
             <select id="capture-quality" name="quality">
               <option value="draft">Draft — quickest camera and coverage check</option>
-              <option value="standard" selected>Standard — measured everyday quality</option>
-              <option value="archive">Archive — longest, use after validating coverage</option>
+              <option value="standard" selected>Standard — balanced reconstruction</option>
+              <option value="archive">Archive — experimental on workstations</option>
             </select>
+            <small class="muted">Build time depends on the capture. Archive quality needs validation on this workstation.</small>
           </label>
           <div class="capture-note">
-            <strong>Local from start to finish</strong>
-            <span>Files are copied into this archive on this workstation. Nothing is uploaded to a cloud service.</span>
+            <strong>A little overlap goes a long way</strong>
+            <span>Move around the space, keep details in focus, and capture objects from several angles. Processing stays on this computer.</span>
           </div>
         </div>
 
         <div class="capture-tray" id="capture-tray">
-          <input id="capture-files" name="files" type="file" multiple required
+          <input id="capture-files" name="files" type="file" multiple
             accept="image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif,video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska"/>
           <div class="capture-tray-mark" aria-hidden="true">
             <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5"/></svg>
@@ -779,9 +768,17 @@ function renderCreate() {
     const total = state.captureFiles.reduce((sum, file) => sum + file.size, 0);
     const images = state.captureFiles.filter((file) => file.type.startsWith("image/")).length;
     const videos = state.captureFiles.filter((file) => file.type.startsWith("video/")).length;
+    (state.capturePreviewUrls || []).forEach(url => URL.revokeObjectURL(url));
+    state.capturePreviewUrls = [];
+    const thumbnails = state.captureFiles.slice(0,6).map(file => {
+      if (!/\.(jpe?g|png|webp)$/i.test(file.name)) return `<span class="selected-file-type">${escapeHtml(file.name.split('.').pop().toUpperCase())}</span>`;
+      const url=URL.createObjectURL(file);state.capturePreviewUrls.push(url);
+      return `<img src="${url}" alt="${escapeHtml(file.name)}"/>`;
+    }).join('');
     selection.innerHTML = `
-      <div><strong>${fmt(state.captureFiles.length)} files ready</strong><span>${fmtBytes(total)}</span></div>
-      <p>${images ? `${fmt(images)} photograph${images === 1 ? "" : "s"}` : ""}${images && videos ? " · " : ""}${videos ? `${fmt(videos)} video${videos === 1 ? "" : "s"}` : ""}</p>`;
+      <div><strong>${fmt(state.captureFiles.length)} file${state.captureFiles.length===1?'':'s'} ready</strong><span>${fmtBytes(total)}</span></div>
+      <p>${images ? `${fmt(images)} photograph${images === 1 ? "" : "s"}` : ""}${images && videos ? " · " : ""}${videos ? `${fmt(videos)} video${videos === 1 ? "" : "s"}` : ""}</p><div class="selected-thumbnails">${thumbnails}</div><button type="button" class="ghost" id="clear-media">Clear selection</button>`;
+    $('#clear-media').onclick=()=>{input.value='';setFiles([]);};
     selection.classList.remove("hidden");
     submit.disabled = false;
   };
@@ -800,7 +797,8 @@ function renderCreate() {
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    if (!state.captureFiles.length || !form.reportValidity()) return;
+    if (state.captureUploading || !state.captureFiles.length || !form.reportValidity()) return;
+    state.captureUploading = true;
     const data = new FormData();
     data.append("title", $("#capture-title").value);
     data.append("subject", $("#capture-subject").value);
@@ -828,6 +826,7 @@ function renderCreate() {
       let payload = {};
       try { payload = JSON.parse(xhr.responseText || "{}"); } catch { /* response handled below */ }
       if (xhr.status < 200 || xhr.status >= 300) {
+        state.captureUploading = false;
         result.innerHTML = `<strong>Could not start this capture</strong><span>${escapeHtml(payload.error || `Server returned ${xhr.status}`)}</span>`;
         result.className = "capture-result error";
         submit.disabled = false;
@@ -835,22 +834,32 @@ function renderCreate() {
         return;
       }
       bar.value = 100;
+      state.captureUploading = false;
+      state.captureFiles = [];
+      state.captureDraft = {};
       value.textContent = "100%";
       $("#capture-progress-label").textContent = "Media copied";
-      result.innerHTML = `<strong>Processing has started</strong><span>${escapeHtml(payload.title)} is now preparing photographs. You can follow it in the Library.</span><button type="button" class="soft" id="btn-open-new-run">Open Library</button>`;
+      result.innerHTML = `<strong>Processing has started</strong><span>${escapeHtml(payload.title)} is now preparing photographs. Open its workspace to follow the build.</span><button type="button" class="soft" id="btn-open-new-run">Open capture →</button>`;
       result.className = "capture-result success";
       submit.textContent = "Started";
       await loadRuns(false);
-      $("#btn-open-new-run")?.addEventListener("click", () => switchView("runs"));
+      $("#btn-open-new-run")?.addEventListener("click", () => openRun(payload.name));
     });
     xhr.addEventListener("error", () => {
-      result.innerHTML = "<strong>Connection interrupted</strong><span>The media stayed on this computer. Try again.</span>";
+      state.captureUploading = false;
+      result.innerHTML = "<strong>Connection interrupted</strong><span>Check the Library before retrying: the server may already have started this capture.</span>";
       result.className = "capture-result error";
       submit.disabled = false;
       submit.textContent = "Create splat";
     });
     xhr.send(data);
   });
+  const draft = state.captureDraft || {};
+  $('#capture-title').value = draft.title || '';
+  $('#capture-subject').value = draft.subject || '';
+  $('#capture-quality').value = draft.quality || 'standard';
+  form.addEventListener('input',()=>{state.captureDraft={title:$('#capture-title').value,subject:$('#capture-subject').value,quality:$('#capture-quality').value};});
+  if (state.captureFiles.length) setFiles(state.captureFiles);
 }
 
 /* ---------- library / runs list ---------- */
@@ -893,6 +902,7 @@ function teamsPanelHtml() {
 }
 
 function renderRunsList() {
+  if (!isAdv()) return renderStudioLibrary(studioContext());
   const runs = state.runs;
   const adv = isAdv();
 
@@ -910,13 +920,13 @@ function renderRunsList() {
         </p>
       </div>
       <div class="toolbar">
-        <button type="button" id="btn-refresh" class="ghost">${adv ? "Refresh" : "Refresh list"}</button>
+        <button type="button" id="btn-library-create" class="primary">Create a splat</button><button type="button" id="btn-refresh" class="ghost">${adv ? "Refresh" : "Refresh list"}</button>
       </div>
     </div>
 
-    ${renderMissionBoard(runs)}
+    ${adv ? renderMissionBoard(runs) : ""}
 
-    ${teamsPanelHtml()}
+    ${adv ? teamsPanelHtml() : ""}
 
     <div class="section-heading">
       <h3>${adv ? "Run list" : "Archives in this library"}</h3>
@@ -940,18 +950,19 @@ function renderRunsList() {
           : `<div class="card empty">
               <h3>No archives yet</h3>
               <p>
-                When a capture has been processed, it will appear here.
-                Ask a technician to run the pipeline, or use the project documentation for step-by-step setup.
+                Add photographs or video of one space to start your first capture.
+                Its progress and completed model will appear here.
               </p>
               <div class="hint-box">
-                For technical staff — create a first archive with:
-                <code>python -m vitrine run --run-dir runs/my-capture --source source --title "My space"</code>
+                Choose Create a splat above to select media from this computer.
+
               </div>
             </div>`
         : `<div class="grid cols-2" id="run-list"></div>`
     }
   `;
   $("#btn-refresh")?.addEventListener("click", () => loadRuns(true));
+  $("#btn-library-create")?.addEventListener("click", () => switchView("create"));
 
   const list = $("#run-list");
   if (!list) return;
@@ -1039,9 +1050,10 @@ function renderRunsList() {
 }
 
 async function openRun(name) {
+  state.studioTab = null;
   state.view = "run";
   document.body.classList.add("run-workspace-active");
-  setNav(null);
+  setNav("runs");
   stopLivePoll();
   viewEl.innerHTML = `<div class="loading">${isAdv() ? `Loading ${escapeHtml(name)}…` : "Opening archive…"}</div>`;
   try {
@@ -1049,8 +1061,8 @@ async function openRun(name) {
     state.selected = detail;
     renderRunDetail(detail);
     showFlash(null);
-    if (detail.headline?.running) {
-      loadLog(name, "train");
+    if (detail.headline?.running || detail.object_workflow?.running || detail.capture_job?.running) {
+      loadLog(name, detail.object_workflow?.running ? "objects" : "train");
       startLivePoll(name);
     }
   } catch (err) {
@@ -1072,7 +1084,7 @@ function startLivePoll(name) {
       state.selected = detail;
       renderRunDetail(detail);
       if (detail.headline?.running) loadLog(name, "train");
-      else stopLivePoll();
+      if (!detail.headline?.running && !detail.object_workflow?.running && !detail.capture_job?.running) stopLivePoll();
     } catch {
       /* transient */
     }
@@ -1081,7 +1093,72 @@ function startLivePoll(name) {
 
 /* ---------- run detail ---------- */
 
+function objectSeparationHtml(run, adv) {
+  const flow = run.object_workflow || {};
+  const outputs = flow.outputs;
+  if (!adv && !flow.configured && !outputs && !flow.running) return "";
+  const inputs = (flow.inputs || []).map((item) => `
+    <a class="object-input" href="${item.url}" download>
+      <span>${escapeHtml(item.role)}</span>
+      <strong>${escapeHtml(item.name)}</strong>
+      <em>${fmtBytes(item.bytes)}</em>
+    </a>`).join("");
+  const objectCards = (outputs?.objects || []).map((item) => `
+    <article class="object-result">
+      <div class="object-thumb ${item.thumb_url ? "" : "object-thumb-empty"}">
+        ${item.thumb_url
+          ? `<img src="${item.thumb_url}" alt="Separated ${escapeHtml(item.label || "object")}" loading="lazy"/>`
+          : `<span aria-hidden="true">◇</span>`}
+      </div>
+      <div class="object-result-copy">
+        <strong>${escapeHtml(item.label || item.object_id || "Unlabelled object")}</strong>
+        <span>${item.confidence != null ? `${fmt(item.confidence * 100, 0)}% confidence` : "Validated output"}${item.coverage != null ? ` · ${fmt(item.coverage * 100, 0)}% coverage` : ""}</span>
+        ${item.mesh_url ? `<a href="${item.mesh_url}" download>Download ${escapeHtml(item.mesh_name || "3D model")}</a>` : ""}
+      </div>
+    </article>`).join("");
+  const status = flow.running ? "Separating objects…" : outputs
+    ? `${fmt(outputs.count)} object${outputs.count === 1 ? "" : "s"} separated`
+    : !flow.configured ? "Sidecar not connected" : flow.ready ? "Ready to separate" : "3D model required";
+  const disabled = !flow.ready || !flow.configured || flow.running;
+  const reason = !flow.ready
+    ? "Build or export the splat first. The separator uses the registered views, camera poses, and available 3D model outputs."
+    : !flow.configured
+      ? "Set VITRINE_OBJECT_SIDECAR before starting the dashboard to connect the external object model."
+      : "The external sidecar reads this run in place and publishes only validated, checksummed 3D outputs.";
+  return `
+    <section class="card object-workbench section-gap" aria-labelledby="object-separation-title">
+      <div class="object-workbench-head">
+        <div>
+          <p class="page-kicker">${adv ? "Optional sidecar stage" : "From room to collection"}</p>
+          <h3 id="object-separation-title" class="serif">Object separation</h3>
+          <p>${escapeHtml(reason)}</p>
+        </div>
+        <div class="object-action">
+          <span class="object-status ${flow.running ? "running" : outputs ? "done" : ""}">${escapeHtml(status)}</span>
+          <button type="button" class="primary" id="btn-separate-objects" ${disabled ? "disabled" : ""}>
+            ${outputs ? "Separate again" : "Separate objects"}
+          </button>
+        </div>
+      </div>
+      <div class="object-flow" aria-label="Object separation data flow">
+        <div class="object-flow-stage">
+          <span class="object-flow-label">Input reconstruction</span>
+          <div class="object-inputs">${inputs || "<span class=\"faint\">No 3D output yet</span>"}</div>
+        </div>
+        <span class="object-flow-arrow" aria-hidden="true">→</span>
+        <div class="object-flow-stage object-flow-results">
+          <span class="object-flow-label">Separated 3D assets</span>
+          ${objectCards ? `<div class="object-results">${objectCards}</div>` : `<p class="object-empty">Run separation to recover individual models from the preserved scene.</p>`}
+        </div>
+      </div>
+      ${outputs?.composed_scene ? `<div class="composed-scene-link"><span>Composed scene</span><a href="${outputs.composed_scene.url}" download>Download placed GLB</a><em>Observed scene + generated object derivatives</em></div>` : ""}
+      ${flow.running ? `<div class="object-progress" role="status"><i></i><span>The sidecar is processing locally. This view updates every four seconds.</span></div>` : ""}
+      <div class="object-feedback" id="object-feedback" aria-live="polite"></div>
+    </section>`;
+}
+
 function renderRunDetail(run) {
+  if (!isAdv()) return renderStudioDetail(run, studioContext());
   const adv = isAdv();
   const h = run.headline || {};
   const stages = run.stages || {};
@@ -1417,6 +1494,8 @@ function renderRunDetail(run) {
           </div>`
     }
 
+    ${objectSeparationHtml(run, adv)}
+
     <div class="grid cols-2 section-gap">
       <div class="card">
         <h3 class="serif">${adv ? "Pipeline goals &amp; status" : "Goals &amp; progress"}</h3>
@@ -1538,8 +1617,30 @@ function renderRunDetail(run) {
   $("#btn-log-sfm")?.addEventListener("click", () => loadLog(run.name, "sfm"));
   $("#btn-log-train-panel")?.addEventListener("click", () => loadLog(run.name, "train"));
   $("#btn-log-sfm-panel")?.addEventListener("click", () => loadLog(run.name, "sfm"));
+  $("#btn-separate-objects")?.addEventListener("click", () => startObjectSeparation(run.name));
 
   if (history.length) drawHistoryChart($("#hist-chart"), history);
+}
+
+async function startObjectSeparation(name) {
+  const button = $("#btn-separate-objects");
+  const feedback = $("#object-feedback");
+  if (button) button.disabled = true;
+  if (feedback) feedback.textContent = "Starting local object separation…";
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(name)}/objects`, { method: "POST" });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || `Request failed (${res.status})`);
+    if (feedback) feedback.textContent = "Object separation started.";
+    const detail = await api(`/api/runs/${encodeURIComponent(name)}`);
+    state.selected = detail;
+    renderRunDetail(detail);
+    loadLog(name, "objects");
+    startLivePoll(name);
+  } catch (err) {
+    if (feedback) feedback.textContent = String(err.message || err);
+    if (button) button.disabled = false;
+  }
 }
 
 async function loadLog(name, which) {
@@ -1941,6 +2042,9 @@ function setNav(active) {
 }
 
 async function switchView(name) {
+  if (state.captureUploading) { showFlash('Media is still being copied. Wait until processing starts before leaving this page.'); return; }
+  state.presenting = false;
+  document.body.classList.remove('presentation-mode');
   stopLivePoll();
   document.body.classList.remove("run-workspace-active");
   state.view = name;
@@ -1985,6 +2089,22 @@ function bindNav() {
 }
 
 /* ---------- boot ---------- */
+
+function studioContext() {
+  return { state, viewEl, displayName, fmt, fmtBytes, openRun, switchView, loadRuns, startObjectSeparation };
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && state.presenting) {
+    state.presenting = false;
+    document.body.classList.remove('presentation-mode');
+    const button = $('#studio-present');
+    if (button) { button.textContent = 'Present'; button.setAttribute('aria-pressed', 'false'); }
+  }
+});
+window.addEventListener('beforeunload', (event) => {
+  if(state.captureUploading){event.preventDefault();event.returnValue='';}
+});
 
 state.advanced = loadMode();
 bindModeToggle();

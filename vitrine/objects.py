@@ -34,7 +34,7 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 # Per-object fields carried into the preservation manifest. Required ones must
 # be present and valid; optional ones are copied only when present.
-_REQUIRED = ("object_id", "label", "mesh_path", "sha256")
+_REQUIRED = ("object_id", "label", "sha256")
 
 
 class ObjectManifestError(ValueError):
@@ -149,15 +149,21 @@ def load_validated_objects(objects_dir: Path) -> list[dict[str, Any]]:
         if not isinstance(label, str) or not label:
             raise ObjectManifestError(f"objects[{i}].label must be a non-empty string")
 
-        mesh_path = rec["mesh_path"]
-        resolved = resolve_contained(mesh_path, f"objects[{i}].mesh_path", root)
+        asset_fields = [key for key in ("mesh_path", "splat_path") if key in rec]
+        if len(asset_fields) != 1:
+            raise ObjectManifestError(f"objects[{i}] requires exactly one of mesh_path or splat_path")
+        path_field = asset_fields[0]
+        mesh_path = rec[path_field]
+        resolved = resolve_contained(mesh_path, f"objects[{i}].{path_field}", root)
+        if path_field == "splat_path" and resolved.suffix.lower() != ".splat":
+            raise ObjectManifestError(f"objects[{i}].splat_path must reference a .splat derivative")
         # is_symlink must be checked on the literal (unresolved) path — a resolved
         # path has followed the link and would never report as one.
         literal = objects_dir / mesh_path
         if literal.is_symlink() or not resolved.is_file():
-            raise ObjectManifestError(f"objects[{i}].mesh_path is not a regular file: {mesh_path!r}")
+            raise ObjectManifestError(f"objects[{i}].{path_field} is not a regular file: {mesh_path!r}")
         if mesh_path in seen_paths:
-            raise ObjectManifestError(f"duplicate mesh_path {mesh_path!r}")
+            raise ObjectManifestError(f"duplicate asset path {mesh_path!r}")
         seen_paths.add(mesh_path)
 
         declared = rec["sha256"]
@@ -170,8 +176,12 @@ def load_validated_objects(objects_dir: Path) -> list[dict[str, Any]]:
             )
 
         out: dict[str, Any] = {
-            "object_id": oid, "label": label, "mesh_path": mesh_path, "sha256": actual,
+            "object_id": oid, "label": label, path_field: mesh_path, "sha256": actual,
         }
+        if path_field == "splat_path":
+            if resolved.stat().st_size == 0 or resolved.stat().st_size % 32 != 0:
+                raise ObjectManifestError(f"objects[{i}].splat_path has an invalid binary splat size")
+            out["asset_type"] = "gaussian-splat"
         if "transform" in rec:
             out["transform"] = _validate_transform(rec["transform"], f"objects[{i}].transform")
         if "orientation_status" in rec:

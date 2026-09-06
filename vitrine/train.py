@@ -92,20 +92,22 @@ OPACITY_REG_UNTIL_REFINE_STOP = False
 #: collapsed and the 64% that did not.
 MIN_SAFE_COVERAGE = 0.5
 
-#: Per-image appearance compensation. Auto-exposure and auto-white-balance move
-#: between shots — a 741-image capture spanning three phones and a walkthrough
-#: video has no single exposure — but a splat has exactly one radiance field to
-#: satisfy every view. Without somewhere to put that variation the optimiser
-#: bakes the average into the geometry, which shows up as haze and ghosting.
-#: Each *training* view therefore learns a 3-channel gain and bias applied to
-#: the render before the loss. Held-out views are scored at identity, so this
-#: cannot inflate the reported metric — it only stops exposure drift from being
-#: charged to geometry. Measured on the untreated nested-cinema-03-hq model, a
-#: best-fit per-view affine recovered 1.6 dB, which is the size of the error
-#: this removes from the geometry's shoulders.
-APPEARANCE_OPT = True
+#: Optional experiment: learn a three-channel gain and bias for each training
+#: view to try to separate exposure/white-balance differences from geometry.
+#: A post-hoc affine fit recovered 1.6 dB on untreated nested-cinema-03-hq, but
+#: that diagnostic does not establish that jointly learning gains helps the
+#: canonical model. Held-out views and portable exports use identity gains;
+#: learned training-view compensation can move canonical brightness away from
+#: those targets, even with a penalty pulling gains toward identity.
+# Opt-in: a matched video-only test on fresh poses (same 25 held-out views,
+# 1600px evaluation, seed and 15k-step budget) improved exported PSNR by
+# 4.44 dB and SSIM by 0.00574 with this disabled. Learned training-view gains
+# drift the canonical exposure used by held-out views and portable exports.
+# See docs/demo-video-quality-20260906.md; the earlier mixed-camera master
+# study also favoured disabling it. Keep the optional experiment available.
+APPEARANCE_OPT = False
 LR_APPEARANCE = 1e-3
-APPEARANCE_REG = 1e-2  # pull toward identity; kills the global gain/brightness gauge
+APPEARANCE_REG = 1e-2  # pull toward identity; does not guarantee stable canonical exposure
 
 #: Optional experimental ceiling on the ratio between a Gaussian's largest
 #: and smallest scale axis.  ``None`` preserves the reference MCMC behaviour.
@@ -390,6 +392,8 @@ def evaluate(
     *,
     max_long_edge: int = 1600,
     limit: int | None = None,
+    construction_dir: Path | None = None,
+    construction_step: int = 0,
 ) -> tuple[float, float]:
     """Mean PSNR and SSIM over held-out views, rendered whole."""
     from gsplat import rasterization
@@ -424,6 +428,23 @@ def evaluate(
         image = rendered[0].clamp(0.0, 1.0)
         psnr_values.append(psnr(image, batch.image))
         ssim_values.append(float(ssim(image, batch.image)))
+        if construction_dir is not None and index == indices[0]:
+            # Reuse an evaluation render; never add another GPU render or alter loss.
+            try:
+                from PIL import Image
+                construction_dir.mkdir(parents=True, exist_ok=True)
+                stem = f"step-{construction_step:08d}"
+                picture = Image.fromarray((image.detach().cpu().numpy() * 255).astype(np.uint8))
+                picture.thumbnail((960, 960))
+                temporary = construction_dir / (stem + ".tmp")
+                picture.save(temporary, format="JPEG", quality=88)
+                temporary.replace(construction_dir / (stem + ".jpg"))
+                metadata = construction_dir / (stem + ".json.tmp")
+                metadata.write_text(json.dumps({"step": construction_step,
+                    "camera": views.views[index].name, "recorded_at": time.time()}), encoding="utf-8")
+                metadata.replace(construction_dir / (stem + ".json"))
+            except Exception as exc:
+                logger.warning("Construction preview unavailable: %s", exc)
 
     return float(np.mean(psnr_values)), float(np.mean(ssim_values))
 
@@ -578,7 +599,14 @@ def train(
     # coverage, which is why "train at a higher resolution" looks like it
     # breaks training. It does not — it starves it. Raise the crop with it.
     mean_view_pixels = float(np.mean([v.width * v.height for v in views.views]))
-    coverage = min(1.0, (profile.crop**2) / mean_view_pixels)
+    # ViewSet.crop clips each axis to the actual image dimensions. A 1536
+    # crop on a 2304x1296 video frame is 1536x1296 (66.7% coverage), not a
+    # 1536-square patch (79%). Report the mean actual per-view fraction so
+    # small or wide frames cannot make an unsafe recipe appear safer.
+    coverage = float(np.mean([
+        min(profile.crop, v.width) * min(profile.crop, v.height) / (v.width * v.height)
+        for v in views.views
+    ]))
     logger.info(
         "training %s: %d iters, cap %s, %dpx crops over ~%.0f px views (%.0f%% frame coverage), "
         "SH degree %d, scene_scale %.3f",
@@ -732,7 +760,8 @@ def train(
             )
 
         if eval_every and step > 0 and step % eval_every == 0:
-            eval_psnr, eval_ssim = evaluate(params, views, profile.sh_degree, limit=8)
+            eval_psnr, eval_ssim = evaluate(params, views, profile.sh_degree, limit=8,
+                construction_dir=output_dir / "construction", construction_step=step)
             result = EvalResult(step, eval_psnr, eval_ssim, len(params["means"]))
             history.append(result)
             logger.info("eval  %s", result.line())
@@ -746,7 +775,8 @@ def train(
             _write(params, output_dir / f"checkpoint_{step}.ply", profile.sh_degree, scene_scale)
 
     minutes = (time.time() - started) / 60.0
-    final_psnr, final_ssim = evaluate(params, views, profile.sh_degree)
+    final_psnr, final_ssim = evaluate(params, views, profile.sh_degree,
+        construction_dir=output_dir / "construction", construction_step=profile.iterations)
     logger.info("final eval over %d held-out views: PSNR %.2f dB, SSIM %.4f",
                 len(views.eval_indices), final_psnr, final_ssim)
 
@@ -768,7 +798,10 @@ def train(
             live_anisotropy_median = float(ratios.median())
         else:
             live_anisotropy_median = float("nan")
-    if clamped_fraction > 0.001:
+    # Even a tiny altered fraction can cover a large visible surface. The
+    # video appearance-on experiment altered ~0.074% but its saved PLY was
+    # 0.23 dB below the raw-model score. Never assume a small count is free.
+    if clamped_fraction > 0.0:
         export_params = dict(params)
         export_params["scales"] = torch.nn.Parameter(params["scales"].clamp(max=ceiling))
         export_psnr, export_ssim = evaluate(export_params, views, profile.sh_degree)

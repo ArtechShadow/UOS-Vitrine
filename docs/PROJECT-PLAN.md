@@ -3,7 +3,19 @@
 Living document. **`AGENTS.md` holds the facts; this file holds the plan.**
 Update the status table whenever a module lands.
 
-Last updated: 2026-08-06
+Latest dashboard review: 2026-09-06. The historical pipeline plan below remains
+dated 2026-08-06; current presentation evidence is in
+[demo-ui-review.md](demo-ui-review.md).
+
+- The local preservation dashboard has an Images → 3D splat → Objects workspace,
+  local viewer dependencies, real camera viewpoints and presentation controls.
+- External SAM2 object separation has produced six observed Gaussian candidates
+  on real master data. Integration remains a separate process; this is not an
+  implementation of segmentation inside the MIT core or a finished mesh pipeline.
+- SpaceMouse WebHID controls are implemented; physical motion awaits user verification.
+- A fresh IMG_6318.MOV-only matched quality experiment improved saved-model
+  PSNR by 4.440 dB and SSIM by 0.005743 with appearance compensation disabled;
+  this is now the default. See [the measured report](demo-video-quality-20260906.md).
 
 ---
 

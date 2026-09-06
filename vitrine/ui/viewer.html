@@ -4,9 +4,8 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Vitrine — Explore in 3D</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com"/>
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Source+Serif+4:opsz,wght@8..60,600&display=swap" rel="stylesheet"/>
+  <link rel="icon" href="/static/brand/vitrine-mark-128.png"/>
+  <link rel="stylesheet" href="/static/vendor/fonts.css"/>
   <style>
     html, body {
       margin: 0;
@@ -39,7 +38,7 @@
       border: 1px solid #2c2c34;
       backdrop-filter: blur(12px);
       box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
-      pointer-events: none;
+      pointer-events: auto;
     }
     #hud a {
       pointer-events: auto;
@@ -115,7 +114,25 @@
       color: #3ecf8e;
       background: rgba(62, 207, 142, 0.14);
     }
-  </style>
+    #hud { padding:12px 14px; max-width:min(280px,calc(100vw - 58px)); border-radius:8px; }
+    #hud strong { font-size:14px; }
+    #hud .muted { font-size:10px; }
+    #hud .controls { display:none; }
+    .viewer-tools { position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:30;display:flex;gap:6px;padding:6px;background:#111113e8;border:1px solid #45413b;border-radius:9px;backdrop-filter:blur(10px);max-width:calc(100vw - 30px); }
+    .viewer-tools button,.viewer-tools select { background:transparent;border:0;color:#eee5d9;font:11px system-ui;padding:9px 11px;cursor:pointer;border-radius:5px;white-space:nowrap; }
+    .viewer-tools button:hover { background:#ffffff15; }
+    .viewer-tools select { max-width:145px;background:#232222; }
+    .viewer-tools button:focus-visible,.viewer-tools select:focus-visible{outline:2px solid #ff6a00;outline-offset:1px}
+    .viewer-tools button:disabled {opacity:.4;cursor:default}
+  #spacemouse-status{position:fixed;bottom:82px;left:50%;transform:translateX(-50%);z-index:30;background:#111113ed;border:1px solid #45413b;padding:10px 15px;border-radius:8px;font:12px system-ui;max-width:80vw;color:#eee5d9} @media(max-width:650px){.viewer-tools{flex-wrap:wrap;justify-content:center;width:calc(100vw - 45px)} #spacemouse-status{bottom:125px}}
+
+/* Compact, optional hardware tuning without covering the model. */
+.spacemouse-settings {position:fixed;right:16px;top:16px;z-index:35;background:#161617ed;color:#eee5d9;border:1px solid #45413b;border-radius:8px;padding:12px;font:12px system-ui;max-width:220px;}
+.spacemouse-settings[hidden] {display:none;}
+.spacemouse-settings summary {cursor:pointer;}
+.spacemouse-settings label {display:flex;align-items:center;gap:8px;margin-top:12px;}
+.spacemouse-settings input[type=range] {width:95px;}
+</style>
 </head>
 <body>
 <div id="root"></div>
@@ -130,19 +147,21 @@
   </div>
   <div id="err"></div>
 </div>
-<div id="bar"><i id="bar-fill"></i></div>
+<div id="bar"><i id="bar-fill"></i></div><div id="spacemouse-status" role="status" hidden></div>
+<div class="viewer-tools" aria-label="Viewer controls"><select id="viewpoint" aria-label="Camera viewpoint" hidden></select><button id="reset-view" disabled>Reset view</button><button id="toggle-info" aria-pressed="true">Hide info</button><button id="fullscreen">Fullscreen</button><button id="spacemouse" aria-pressed="false" disabled>Connect SpaceMouse</button><select id="spacemouse-speed" aria-label="SpaceMouse movement speed" hidden><option value="0.3">Slow</option><option value="1" selected>Normal</option><option value="3">Fast</option></select></div>
 
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
-    "@mkkellogg/gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"
+    "three": "/static/vendor/three.module.js",
+    "three/addons/controls/OrbitControls.js": "/static/vendor/OrbitControls.js",
+    "@mkkellogg/gaussian-splats-3d": "/static/vendor/gaussian-splats-3d.module.js"
   }
 }
 </script>
 <script type="module">
 import * as THREE from 'three';
+import { attachSpaceMouse } from '/static/spacemouse.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
 
@@ -150,8 +169,13 @@ const run = decodeURIComponent(
   location.pathname.replace(/^\/viewer\//, '').split('/').filter(Boolean)[0] || ''
 );
 // Absolute URL so the worker/fetch path is unambiguous inside iframes.
-const splatUrl = new URL(`/files/${encodeURIComponent(run)}/model/scene.splat`, location.origin).href;
-const plyUrl = new URL(`/files/${encodeURIComponent(run)}/model/scene.ply`, location.origin).href;
+const query = new URLSearchParams(location.search);
+const requestedScene = query.get('scene');
+const objectScene = requestedScene && requestedScene.startsWith('objects/') && requestedScene.endsWith('.splat') && !requestedScene.includes('..') && !requestedScene.includes('\\') ? requestedScene : null;
+const scenePath = objectScene || 'model/scene.splat';
+const splatUrl = new URL(`/files/${encodeURIComponent(run)}/${scenePath.split('/').map(encodeURIComponent).join('/')}`, location.origin).href;
+const plyPath = objectScene ? objectScene.replace(/\.splat$/, '.ply') : 'model/scene.ply';
+const plyUrl = new URL(`/files/${encodeURIComponent(run)}/${plyPath.split('/').map(encodeURIComponent).join('/')}`, location.origin).href;
 
 function prettyName(name) {
   return String(name || 'Archived space')
@@ -166,8 +190,38 @@ const bar = document.getElementById('bar');
 const barFill = document.getElementById('bar-fill');
 const statusPill = document.getElementById('status-pill');
 const root = document.getElementById('root');
+let viewpoints = [];
+let activeView = 0;
+let resetCamera = null;
+document.getElementById('reset-view').onclick = () => resetCamera?.();
+document.getElementById('viewpoint').onchange = (event) => { activeView = Number(event.target.value); resetCamera?.(); };
+document.getElementById('toggle-info').onclick = (event) => {
+  const hud = document.getElementById('hud'); hud.hidden = !hud.hidden;
+  event.target.textContent = hud.hidden ? 'Show info' : 'Hide info';
+  event.target.setAttribute('aria-pressed', String(!hud.hidden));
+};
+document.getElementById('fullscreen').onclick = async () => {
+  try { if(document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen(); }
+  catch { errEl.textContent = 'Fullscreen is unavailable here. Open the viewer in its own tab.'; }
+};
+function bindCamera(camera, controls, frame) {
+  resetCamera = () => {
+    const pose = viewpoints[activeView];
+    camera.position.fromArray(pose?.position || [frame.cx,frame.cy-frame.radius*.2,frame.cz+frame.radius*(objectScene?3.5:1.35)]);
+    camera.up.fromArray(pose?.up || [0,-1,0]);
+    const target = pose?.lookAt || [frame.cx,frame.cy,frame.cz];
+    camera.fov = pose?.verticalFov || 55;
+    camera.updateProjectionMatrix();
+    camera.lookAt(...target);
+    if(controls) { controls.target.fromArray(target); controls.update(); }
+  };
+  resetCamera();
+  document.getElementById('reset-view').disabled = false;
+  attachSpaceMouse(camera, controls, frame, () => resetCamera?.());
+}
 
-titleEl.textContent = prettyName(run);
+titleEl.textContent = objectScene ? (query.get('label') || 'Isolated object') : prettyName(run);
+if(!objectScene) fetch(`/api/runs/${encodeURIComponent(run)}`).then(r=>r.ok?r.json():null).then(data=>{if(data?.title)titleEl.textContent=data.title;}).catch(()=>{});
 
 function setStatus(label, ready = false) {
   statusPill.textContent = label;
@@ -228,13 +282,13 @@ function frameFromSplat(buf) {
 async function tryGaussianViewer(frame, sceneUrl) {
   const viewer = new GaussianSplats3D.Viewer({
     rootElement: root,
-    cameraUp: [0, -1, 0],
-    initialCameraPosition: [
+    cameraUp: viewpoints[activeView]?.up || [0, -1, 0],
+    initialCameraPosition: viewpoints[activeView]?.position || [
       frame.cx,
       frame.cy - frame.radius * 0.2,
-      frame.cz + frame.radius * 1.35,
+      frame.cz + frame.radius * (objectScene ? 3.5 : 1.35),
     ],
-    initialCameraLookAt: [frame.cx, frame.cy, frame.cz],
+    initialCameraLookAt: viewpoints[activeView]?.lookAt || [frame.cx, frame.cy, frame.cz],
     sharedMemoryForWorkers: false,
     gpuAcceleratedSort: false,
     integerBasedSort: false,
@@ -258,10 +312,11 @@ async function tryGaussianViewer(frame, sceneUrl) {
     },
   });
   viewer.start();
+  bindCamera(viewer.camera, viewer.controls, frame);
   setProgress(1);
   setStatus('Ready to explore', true);
   meta.textContent =
-    `${frame.n.toLocaleString()} detail elements · ${(frame.bytes / 2 ** 20).toFixed(1)} MB · full quality preview`;
+    `${frame.n.toLocaleString()} splats · ${(frame.bytes / 2 ** 20).toFixed(1)} MB · viewing derivative`;
   return viewer;
 }
 
@@ -285,6 +340,7 @@ async function pointCloudFallback(buf, frame) {
   controls.target.set(frame.cx, frame.cy, frame.cz);
   camera.position.set(frame.cx, frame.cy - frame.radius * 0.15, frame.cz + frame.radius * 1.4);
   controls.update();
+  bindCamera(camera, controls, frame);
 
   const maxPts = 800_000;
   const step = Math.max(1, Math.ceil(n / maxPts));
@@ -346,6 +402,17 @@ async function pointCloudFallback(buf, frame) {
 }
 
 async function main() {
+  try {
+    const cameraPath = objectScene ? objectScene.replace(/[^/]+$/, 'viewer-cameras.json') : 'model/viewer-cameras.json';
+    const response = await fetch(new URL(`/files/${encodeURIComponent(run)}/${cameraPath}`,location.origin));
+    if(response?.ok) {
+      const data = await response.json();
+      viewpoints = Array.isArray(data) ? data.filter(p => ['position','lookAt','up'].every(k => Array.isArray(p[k]) && p[k].length===3 && p[k].every(Number.isFinite)) && Number.isFinite(p.verticalFov) && p.verticalFov>0 && p.verticalFov<180) : [];
+      const select = document.getElementById('viewpoint');
+      viewpoints.forEach((p,i)=>{const option=document.createElement('option');option.value=i;option.textContent=p.label || `View ${i+1}`;select.appendChild(option);});
+      select.hidden = viewpoints.length<2;
+    }
+  } catch { /* Optional viewpoints: automatic framing remains available. */ }
   setStatus('Downloading');
   meta.textContent = 'Downloading the model…';
   setProgress(0.02);

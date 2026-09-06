@@ -123,6 +123,7 @@ produced by a separate object-reconstruction sidecar. Unlike the scene splat in
 on the registered images, external generative models, prompts and sidecar-
 specific processing. Treat them as derived, non-evidentiary interpretations. The
 `objects` list in `manifest.json` records each object's label, its `mesh_path`
+or `splat_path` (an isolated Gaussian derivative, not a mesh),
 (relative to `derivatives/objects/`) and a SHA-256 checksum recomputed at
 packaging time, alongside the usual per-file checksums.
 
