@@ -210,15 +210,27 @@ def construction_payload(run_dir, process=None, folder=None):
     """Additive API for new and historical runs, including external experiments."""
     run_dir = Path(run_dir)
     training = folder or run_dir / "model"
+    if folder is not None and (training / "model").is_dir() and not (training / "model").is_symlink():
+        training = training / "model"
     folders = [run_dir, run_dir / "ingest", run_dir / "sfm", training] if folder is None else [training]
     statuses = [s for p in folders if (s := read_json(p / "construction-status.json"))]
     latest = max(statuses, key=lambda s: s.get("heartbeat", 0), default={})
     pipeline = read_json(run_dir / "construction-status.json") if folder is None else None
     if pipeline and pipeline.get("state") == "running":
-        child = {"ingest": run_dir / "ingest", "sfm": run_dir / "sfm", "train": training}.get(pipeline.get("stage"))
+        child = {"ingest": run_dir / "ingest", "sfm": run_dir / "sfm", "train": training, "evaluate": training}.get(pipeline.get("stage"))
         candidate = read_json(child / "construction-status.json") if child else None
         latest = candidate if candidate and candidate.get("started", 0) >= pipeline.get("started", 0) else pipeline
     payload = dict(latest)
+    if folder is None:
+        from .sfm_visual import feature_preview
+        payload["feature_preview"] = feature_preview(run_dir)
+    selection = read_json(run_dir / "ingest/selection.json") if folder is None else None
+    if selection:
+        for record in selection.get("records", []):
+            thumb = record.pop("thumbnail", None)
+            if thumb and re.fullmatch(r"[0-9a-f]{32}\.jpg", str(thumb)):
+                record["url"] = "/files/" + quote(run_dir.name, safe="") + "/ingest/selection-thumbnails/" + thumb
+        payload["selection"] = selection
     progress = read_json(training / "progress.json") or {}
     complete = read_json(training / "train.json")
     snapshots, images = [], []
@@ -242,6 +254,14 @@ def construction_payload(run_dir, process=None, folder=None):
                       "created": entry.get("recorded_at", 0)} for entry in images]
     payload.update(snapshots=snapshots, images=images, training=complete or progress,
                    preview_error=read_json(training / "construction-preview-error.json") or payload.get("preview_error"))
+    payload["evaluation"] = read_json(training / "evaluation.json")
+    payload["evaluation_progress"] = read_json(training / "evaluation-progress.json")
+    payload["packaging"] = read_json(run_dir / "construction-package.json")
+    manifest = read_json(run_dir / "archive/manifest.json")
+    if manifest:
+        payload["packaging"] = dict(complete=True, copied=manifest.get("file_count"),
+                                    checksummed=manifest.get("file_count"), bytes=manifest.get("total_bytes"))
+        payload["manifest_url"] = "/files/" + quote(run_dir.name, safe="") + "/archive/manifest.json"
     done = {"ingest": (run_dir / "ingest/ingest.json").is_file(),
             "sfm": (run_dir / "sfm/sfm.json").is_file(), "train": bool(complete),
             "evaluate": (training / "evaluation.json").is_file() or bool(complete and complete.get("final_psnr") is not None),

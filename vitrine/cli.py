@@ -204,7 +204,11 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     views = ViewSet(model, run_dir / "ingest" / "images", long_edge=profile.source_long_edge)
 
     ply = Path(args.ply) if args.ply else run_dir / "model" / "scene.ply"
-    report = evaluate_ply(ply, views)
+    from .construction import Progress
+    from .evaluation_preview import EvaluationPreview
+    with Progress(run_dir / "model", "evaluate") as observer:
+        preview = EvaluationPreview(run_dir / "model/evaluation-previews", observer)
+        report = evaluate_ply(ply, views, on_view=preview)
     print("\n" + report.summary())
     (run_dir / "model" / "evaluation.json").write_text(report.to_json(), encoding="utf-8")
     return 0

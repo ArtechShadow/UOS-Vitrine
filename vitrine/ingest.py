@@ -195,6 +195,7 @@ def extract_video_frames(
     *,
     fps: float = VIDEO_EXTRACT_FPS,
     max_frames: int = 600,
+    on_frame=None,
 ) -> CameraGroup:
     """Pull frames from a video with ffmpeg into its own camera group.
 
@@ -213,13 +214,24 @@ def extract_video_frames(
         pattern,
     ]
     logger.info("extracting frames from %s at %g fps", video.name, fps)
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed on {video.name}: {result.stderr.strip()[:400]}")
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+        while True:
+            try:
+                _, stderr = process.communicate(timeout=.5)
+                break
+            except subprocess.TimeoutExpired:
+                if on_frame:
+                    for frame in sorted(out_dir.glob("frame_*.png")):
+                        on_frame(frame)
+        if process.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed on {video.name}: {stderr.strip()[:400]}")
 
     frames = sorted(out_dir.glob("frame_*.png"))
     if not frames:
         raise RuntimeError(f"ffmpeg produced no frames from {video.name}")
+    if on_frame:
+        for frame in frames:
+            on_frame(frame)
 
     with Image.open(frames[0]) as im:
         width, height = im.size
@@ -240,6 +252,7 @@ def select_sharpest(
     budget: int,
     *,
     reject_ratio: float = 0.15,
+    on_scored=None,
 ) -> tuple[list[Path], list[tuple[Path, float, str]]]:
     """Choose up to ``budget`` frames, favouring sharpness but keeping coverage.
 
@@ -258,7 +271,12 @@ def select_sharpest(
     if not paths:
         return [], []
 
-    scored = [(p, sharpness(p)) for p in paths]
+    scored = []
+    for path in paths:
+        score = sharpness(path)
+        scored.append((path, score))
+        if on_scored:
+            on_scored(path, score)
     rejected: list[tuple[Path, float, str]] = []
 
     if len(scored) > budget:
@@ -295,6 +313,7 @@ def stage_group(
     dest_root: Path,
     *,
     long_edge: int,
+    on_staged=None,
 ) -> int:
     """Copy or downscale a group's chosen images into ``dest_root/<group>``.
 
@@ -329,6 +348,11 @@ def stage_group(
             written += 1
         except (OSError, ValueError) as exc:
             logger.warning("could not stage %s: %s", path, exc)
+            if on_staged:
+                on_staged(path, False)
+            continue
+        if on_staged:
+            on_staged(path, True)
 
     return written
 
@@ -373,6 +397,8 @@ def _ingest_impl(
 
     notes: list[str] = []
     groups = classify_sources(source_dir, include=include)
+    from .ingest_preview import IngestPreview
+    preview = IngestPreview(out_dir, sum(len(g.paths) for g in groups))
 
     videos = [p for p in sorted(source_dir.rglob("*")) if p.suffix.lower() in VIDEO_SUFFIXES]
     if include:
@@ -381,7 +407,9 @@ def _ingest_impl(
     for video in videos:
         observer.update(message="Extracting video frames", video=video.name)
         frames_dir = out_dir / "_video_frames" / video.stem
-        groups.append(extract_video_frames(video, frames_dir))
+        preview.extracting(video.name)
+        groups.append(extract_video_frames(video, frames_dir,
+                      on_frame=lambda path: preview.extracted("video_" + video.stem, path)))
 
     if not groups:
         raise RuntimeError(f"no usable images or video found under {source_dir}")
@@ -391,9 +419,15 @@ def _ingest_impl(
 
     for group in groups:
         budget = video_budget if group.from_video else stills_budget
-        kept, rejected = select_sharpest(group, budget)
+        observer.update(message="Sorting images", group=group.name)
+        kept, rejected = select_sharpest(group, budget, on_scored=preview.scored)
         all_rejected.extend(rejected)
-        written = stage_group(group, kept, images_root, long_edge=long_edge)
+        for path, score, reason in rejected:
+            preview.decision(group.name, path, "rejected", reason, round(score, 1))
+        def staged(path, success):
+            preview.decision(group.name, path, "kept" if success else "rejected",
+                             "Prepared for camera matching" if success else "Could not prepare this image")
+        written = stage_group(group, kept, images_root, long_edge=long_edge, on_staged=staged)
         accepted += written
         observer.update(count=accepted, unit="prepared images", message="Prepared " + group.name)
         group.paths = kept
@@ -426,4 +460,5 @@ def _ingest_impl(
         notes=notes,
     )
     (out_dir / "ingest.json").write_text(report.to_json(), encoding="utf-8")
+    preview.finish()
     return report

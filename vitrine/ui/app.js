@@ -695,27 +695,24 @@ function renderCreate() {
     <div class="create-shell">
       <header class="create-intro">
         <p class="page-kicker">01 / Images</p>
-        <h2 id="capture-heading">Start with a space.</h2>
+        <h2 id="capture-heading">Create a splat</h2>
         <p id="capture-description">Add overlapping photographs and video of one place. Give the capture a name, then build its 3D splat.</p>
       </header>
       <div class="studio-process" aria-label="Capture workflow"><div><span>01</span><strong>Add images</strong><small>Photographs and video</small></div><div><span>02</span><strong>Build a 3D splat</strong><small>Map cameras and reconstruct</small></div><div><span>03</span><strong>Explore & preserve</strong><small>Review the splat and its archive</small></div></div>
 
       <form id="capture-form" class="capture-form">
-        <div class="capture-fields">
           <fieldset class="capture-kind"><legend>What are you capturing?</legend>
             <label><input type="radio" name="capture_type" value="scene" checked/><span><strong>Scene</strong><small>A room, installation or place</small></span></label>
-            <label><input type="radio" name="capture_type" value="object"/><span><strong>Object</strong><small>One item, photographed from all sides</small></span></label>
+            <label class="capture-kind-locked"><input type="radio" name="capture_type" value="object" disabled/><span><strong>Object <em class="coming-soon">Coming soon</em></strong><small>Individual object capture</small></span></label>
           </fieldset>
-          <div class="capture-source-mode" role="tablist" aria-label="Source type">
-            <button type="button" role="tab" id="source-mode-media" aria-selected="true">Photographs and video</button>
-            <button type="button" role="tab" id="source-mode-session" class="is-locked" aria-selected="false" aria-disabled="true" disabled title="Vitrine App import is coming soon"><span>Vitrine App</span><span class="coming-soon">Coming soon</span></button>
-          </div>
+        <div class="capture-fields">
+          <div class="capture-section-heading"><h3>Capture details</h3><p>Name your space and choose how to build it.</p></div>
           <label>
             <span>Capture title</span>
             <input id="capture-title" name="title" required maxlength="120" placeholder="e.g. Nested Cinema — final installation"/>
           </label>
           <label>
-            <span>What is being preserved?</span>
+            <span>Description <small class="optional-label">Optional</small></span>
             <textarea id="capture-subject" name="subject" rows="3" placeholder="A short description for the preservation record"></textarea>
           </label>
           <label>
@@ -737,12 +734,18 @@ function renderCreate() {
           </div>
         </div>
 
+        <section class="capture-media" aria-label="Capture media">
+          <div class="capture-section-heading"><h3>Add your media</h3><p>Use overlapping views of the same space.</p></div>
+          <div class="capture-source-mode" role="tablist" aria-label="Source type">
+            <button type="button" role="tab" id="source-mode-media" aria-selected="true">Photographs and video</button>
+            <button type="button" role="tab" id="source-mode-session" class="is-locked" aria-selected="false" aria-disabled="true" disabled title="Vitrine App import is coming soon"><span>Vitrine App</span><span class="coming-soon">Coming soon</span></button>
+          </div>
         <div class="capture-tray" id="capture-tray">
           <input id="capture-files" name="files" type="file" multiple
             accept="image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif,video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska"/>
           <input id="capture-session" name="session" type="file" accept=".zip,application/zip" disabled/>
           <div class="capture-tray-mark" aria-hidden="true">
-            <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5"/></svg>
+            <svg width="44" height="44" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="10" width="28" height="28" rx="5"/><path d="m9 31 8-8 7 7 4-4 7 7"/><circle cx="27" cy="19" r="2.5"/><path d="M15 6h20a5 5 0 0 1 5 5v16" opacity=".4"/><circle class="capture-upload-badge" cx="36" cy="36" r="10"/><path d="M36 41V31m-4 4 4-4 4 4"/></svg>
           </div>
           <strong id="capture-tray-title">Drop photographs or video here</strong>
           <span id="capture-tray-copy">or choose files from this computer</span>
@@ -751,6 +754,8 @@ function renderCreate() {
         </div>
 
         <div id="capture-selection" class="capture-selection hidden" aria-live="polite"></div>
+        <p class="capture-local-note">Your files and processing stay on this computer.</p>
+        </section>
         <div id="capture-progress" class="capture-progress hidden" aria-live="polite">
           <div><span id="capture-progress-label">Copying media…</span><b id="capture-progress-value">0%</b></div>
           <progress id="capture-progress-bar" max="100" value="0"></progress>
@@ -903,7 +908,7 @@ function renderCreate() {
   form.elements.capture_type.value = draft.capture_type === 'object' ? 'object' : 'scene';
   const updateCaptureKind = () => {
     const object = form.elements.capture_type.value === 'object';
-    $('#capture-heading').textContent = object ? 'Preserve an object, from every angle.' : 'Start with a space.';
+    $('#capture-heading').textContent = object ? 'Preserve an object, from every angle.' : 'Create a splat';
     $('#capture-description').textContent = object ? 'Add overlapping photographs or a video orbit of one stationary item. Watch camera positions and its 3D splat emerge as it builds.' : 'Add overlapping photographs and video of one place. Give the capture a name, then build its 3D splat.';
     $('#capture-title').placeholder = object ? 'e.g. Vintage radio — collection record' : 'e.g. Nested Cinema — final installation';
     $('#capture-note-media').innerHTML = object
@@ -2100,6 +2105,7 @@ async function switchView(name) {
   if (state.captureUploading) { showFlash('Media is still being copied. Wait until processing starts before leaving this page.'); return; }
   state.presenting = false;
   document.body.classList.remove('presentation-mode');
+  document.body.classList.toggle('construction-active', name === 'construction');
   stopLivePoll();
   document.body.classList.remove("run-workspace-active");
   state.view = name;
@@ -2168,4 +2174,5 @@ bindModeToggle();
 applyModeChrome();
 bindNav();
 loadHealth();
-switchView(new URLSearchParams(location.search).get("view") === "construction" ? "construction" : "runs");
+const initialView = new URLSearchParams(location.search).get("view");
+switchView(["create", "construction"].includes(initialView) ? initialView : "runs");

@@ -557,7 +557,31 @@ def _list_runs(
         )
         if not any(m.exists() for m in markers):
             continue
-        runs.append(_summarise_run(path))
+        summary = _summarise_run(path)
+        summary["experiments"] = []
+        experiments = path / "experiments"
+        if experiments.is_dir() and not experiments.is_symlink():
+            from .construction import construction_payload
+            for experiment in sorted(experiments.iterdir()):
+                if not experiment.is_dir() or experiment.is_symlink():
+                    continue
+                model = experiment / "model" if (experiment / "model").is_dir() else experiment
+                if model.is_symlink():
+                    continue
+                if not any((model / marker).exists() for marker in ("scene.ply", "progress.json", "construction-status.json")):
+                    continue
+                payload = construction_payload(path, folder=experiment)
+                images = payload.get("images") or []
+                complete = (model / "scene.ply").is_file()
+                summary["experiments"].append({
+                    "name": experiment.name,
+                    "state": payload.get("state", "unknown"),
+                    "complete": complete,
+                    "preview": images[-1]["url"] if images else None,
+                    "url": "/static/construction.html?run=" + quote(path.name, safe="") + "&experiment=" + quote(experiment.name, safe=""),
+                    "ply_url": "/files/" + quote(path.name, safe="") + "/" + quote((model / "scene.ply").relative_to(path).as_posix(), safe="/") if complete else None,
+                })
+        runs.append(summary)
     # Most recently touched first (by train.json or dir mtime).
     def sort_key(r: dict[str, Any]) -> float:
         if r.get("splat_created_mtime") is not None:
@@ -901,7 +925,9 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             run_dir = _safe_run_dir(self.runs_root, name)
             if run_dir is None:
                 return self._send_text("run not found", status=404)
-            if not (run_dir / "model" / "scene.splat").is_file():
+            requested_scene = parse_qs(urlparse(self.path).query).get("scene", ["model/scene.splat"])[0]
+            scene_file = _safe_file_under_run(run_dir, requested_scene)
+            if scene_file is None or scene_file.suffix != ".splat" or not scene_file.is_file():
                 return self._send_text("no scene.splat for this run", status=404)
             return self._send_file(self.ui_dir / "viewer.html")
 

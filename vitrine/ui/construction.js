@@ -1,17 +1,32 @@
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {Viewer, SceneFormat} from '@mkkellogg/gaussian-splats-3d';
+import {paintEvidence} from './construction-progress.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 if (params.has('embedded')) document.body.classList.add('construction-embedded');
-const stages = [['ingest','Prepare images'],['sfm','Find camera positions'],['train','Build splat'],['evaluate','Evaluate'],['package','Package']];
-document.querySelector('.build-stages').innerHTML = stages.map(([id,title],i)=>`<li data-stage="${id}"><b>0${i+1}</b>${title}</li>`).join('');
+const stages = [['ingest','Prepare images'],['sfm','Find camera positions'],['train','Build splat'],['evaluate','Evaluate'],['package','Package'],['viewer','Viewer']];
+document.querySelector('.build-stages').innerHTML = stages.map(([id,title],i)=>`<li data-stage="${id}"><button type="button"><b>0${i+1}</b>${title}</button></li>`).join('');
+let inspectedStage = null;
+document.querySelectorAll('.build-stages [data-stage]').forEach(item => item.querySelector('button').onclick = () => {
+  stopReplay(); following = false;
+  inspectedStage = item.dataset.stage;
+  compare = false; $('comparison').hidden = true;
+  if (data && ['sfm','train'].includes(inspectedStage)) {
+    stopReplay(); following = false;
+    selectedId = (data.snapshots || []).filter(s => inspectedStage === 'sfm' ? s.kind === 'sparse' : s.kind === 'splat').at(-1)?.id;
+  }
+  paint();
+});
 const number = value => Number.isFinite(value) ? value.toLocaleString(undefined,{maximumFractionDigits:0}) : '—';
 let run = params.get('run'), experiment = params.get('experiment'), following = true, selectedId = null;
 let data = null, loadedId = null, loading = false, playback = null, generation = 0, stopped = false;
 let renderer, camera, controls, scene, splats, cloud, frustums, bounds, fitted = false, splatCount = 0;
 let renderFailed = false, compare = false;
+let captureUp = null, captureBack = null;
+let completedViewerUrl = null;
+const shownSnapshots = () => (data?.snapshots || []).filter(s => inspectedStage === 'sfm' ? s.kind === 'sparse' : inspectedStage === 'train' ? s.kind === 'splat' || s.kind === 'render' : true);
 
 function initRenderer() {
   if (renderer || renderFailed) return;
@@ -32,7 +47,7 @@ function initRenderer() {
     const theme = () => {renderer.setClearColor(getComputedStyle(document.documentElement).getPropertyValue('--canvas').trim());};
     theme();window.addEventListener('themechange',theme);
     renderer.setAnimationLoop(()=>{
-      if (document.hidden || stopped) return;
+      if (document.hidden || stopped || inspectedStage === 'viewer') return;
       controls.update();
       if (splats && splatCount) {splats.update();splats.render();}
       else renderer.render(scene,camera);
@@ -63,10 +78,39 @@ function reset() {
   if (!bounds || !camera) return;
   const radius=Math.max(bounds.radius,.001);
   controls.target.copy(bounds.center);
-  camera.position.copy(bounds.center).add(new THREE.Vector3(0,-.3*radius,2.7*radius));
+  const up = captureUp || new THREE.Vector3(0,-1,0);
+  const back = captureBack || new THREE.Vector3(0,0,1);
+  // OrbitControls caches its up-axis at construction time.
+  if (camera.up.distanceToSquared(up) > 1e-8) {
+    controls.dispose(); camera.up.copy(up);
+    controls = new OrbitControls(camera,renderer.domElement);
+    controls.enableDamping = true;
+    controls.target.copy(bounds.center);
+  }
+  camera.position.copy(bounds.center).addScaledVector(back,2.7*radius).addScaledVector(up,.3*radius);
   camera.near=radius/10000;camera.far=radius*100;camera.updateProjectionMatrix();controls.update();fitted=true;
 }
 function makeSparse(payload) {
+  // COLMAP camera coordinates are right/down/forward. Negative column 1
+  // therefore estimates capture-up; positions alone cannot establish gravity.
+  // Freeze the first usable orientation so live snapshots never roll the view.
+  if (!captureUp && payload.cameras.length >= 3) {
+    const up = new THREE.Vector3();
+    for (const view of payload.cameras) {
+      const m = view.camera_to_world;
+      up.add(new THREE.Vector3(-m[0][1],-m[1][1],-m[2][1]).normalize());
+    }
+    if (up.length() / payload.cameras.length > .5) {
+      captureUp = up.normalize();
+      const m = payload.cameras[0].camera_to_world;
+      captureBack = new THREE.Vector3(-m[0][2],-m[1][2],-m[2][2]);
+      captureBack.addScaledVector(captureUp,-captureBack.dot(captureUp));
+      if (captureBack.lengthSq() < 1e-6) captureBack.set(1,0,0).addScaledVector(captureUp,-captureUp.x);
+      if (captureBack.lengthSq() < 1e-6) captureBack.set(0,0,1);
+      captureBack.normalize();
+      fitted = false;
+    }
+  }
   const group = new THREE.Group();
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position',new THREE.Float32BufferAttribute(payload.positions,3));
@@ -167,20 +211,26 @@ function showComparison(value) {
 }
 function paint() {
   if (!data) return;
-  const shots=data.snapshots || [];
+  const displayedStage = inspectedStage || data.stage;
+  paintEvidence(data, displayedStage);
+  document.querySelectorAll('.build-stages [data-stage] button').forEach(button => button.setAttribute('aria-pressed', String(button.parentElement.dataset.stage === displayedStage)));
+  const shots=shownSnapshots();
   if (following) selectedId=shots.at(-1)?.id;
   let index=shots.findIndex(s=>s.id===selectedId);
   if(index<0 && shots.length){index=0;selectedId=shots[0].id;}
   const shot=shots[index];
+  $('geometry').style.visibility = shot ? 'visible' : 'hidden';
+  $('build-empty').hidden = !!shot;
   document.querySelectorAll('[data-stage]').forEach(el=>{
     const active=el.dataset.stage===data.stage && data.state==='running';
-    el.classList.toggle('active',active);el.classList.toggle('done',!!data.done?.[el.dataset.stage]);
+    el.classList.toggle('active',active);el.classList.toggle('done',el.dataset.stage==='viewer' ? !!data.final_url : !!data.done?.[el.dataset.stage]);
     if(active)el.setAttribute('aria-current','step');else el.removeAttribute('aria-current');
   });
   $('stage-title').textContent=stages.find(s=>s[0]===data.stage)?.[1] || 'Construction';
   $('state-label').textContent=({running:'Processing locally',complete:'Processing finished',failed:'Needs attention',unknown:'Status unknown · connection may be lost'})[data.state] || 'Local workspace';
   const descriptions={ingest:'Preparing photographs and video frames for reconstruction.',sfm:'Finding overlapping views and recovering camera positions.',train:'Refining the splat from the registered photographs.',evaluate:'Measuring how the reconstruction matches photographed views.',package:'Collecting the model and preservation records.'};
-  $('stage-copy').textContent=data.state==='failed' ? (data.error || 'Processing stopped. Inspect the log before retrying.') : data.historical?'This capture predates recorded construction previews. Its completed model is available below.':descriptions[data.stage];
+  const substeps = {feature_extractor:'Detecting distinctive image details for camera matching.',sequential_matcher:'Matching overlapping video frames.',exhaustive_matcher:'Comparing image pairs to find shared details.',mapper:'Recovering camera positions and triangulating the room. Camera markers and points appear as COLMAP publishes them.',model_converter:'Saving calibrated cameras and points in the archive format.'};
+  $('stage-copy').textContent=data.state==='failed' ? (data.error || 'Processing stopped. Inspect the log before retrying.') : data.historical?'This capture predates recorded construction previews. Its completed model is available below.':substeps[data.substage] || descriptions[data.stage];
   $('build-progress').hidden=data.state!=='running';
   const count=data.stage==='train'?data.step:data.count;
   if(Number.isFinite(data.total)&&Number.isFinite(count)&&data.total>0){$('build-progress').max=data.total;$('build-progress').value=count;}else $('build-progress').removeAttribute('value');
@@ -196,21 +246,29 @@ function paint() {
   $('log-link').href=`/api/runs/${encodeURIComponent(run)}/log?which=${data.stage==='sfm'?'sfm':'train'}`;
   $('timeline').max=Math.max(0,shots.length-1);$('timeline').value=Math.max(0,index);$('timeline').disabled=!shots.length;
   $('timeline-count').textContent=shots.length+' snapshots';$('replay').disabled=shots.length<2;
-  $('follow').setAttribute('aria-pressed',String(following));$('timeline-mode').textContent=following?'Live':playback?'Replay':'Recorded';
+  $('follow').setAttribute('aria-pressed',String(following));$('timeline-mode').textContent=inspectedStage?'Stage review':following?'Live':playback?'Replay':'Recorded';
   $('compare').disabled=!data.images?.length;
   $('caption').textContent=shot?`${shot.kind!=='sparse'?'Training step '+number(shot.step):number(shot.registered)+' registered views'} · ${new Date((shot.captured||shot.created)*1000).toLocaleTimeString()} · recorded snapshot`: 'No geometry snapshots recorded yet.';
   $('final-viewer').hidden=!data.final_url;if(data.final_url)$('final-viewer').href=data.final_url;
-  if(!loadedId){$('empty-title').textContent=data.state==='running'?'Your space is being reconstructed.':data.historical?'Your finished space is ready.':'A space, taking shape.';}
+  if (displayedStage === 'viewer') {
+    $('stage-title').textContent = 'Splat viewer';
+    $('stage-copy').textContent = data.final_url ? 'Explore the completed browser splat. Download the full-SH PLY master from the viewer for maximum fidelity.' : 'The interactive viewer becomes available when the browser splat is exported.';
+    $('caption').textContent = data.final_url ? 'Completed browser output · not a reduced-count construction snapshot' : 'Waiting for the completed browser splat';
+  }
+  if(!shot){
+    $('empty-title').textContent=displayedStage==='sfm'?'Finding how the photographs connect.':data.state==='running'?'Your space is being reconstructed.':data.historical?'Your finished space is ready.':'A space, taking shape.';
+    $('empty-copy').textContent=displayedStage==='sfm' ? (substeps[data.substage] || 'Recorded camera positions and sparse points appear here when available.') : 'Recorded splat previews will appear as training progresses.';
+  }
   if(compare||renderFailed)showComparison(true);
   loadSnapshot(shot);
 }
 function stopReplay(){clearInterval(playback);playback=null;$('replay').textContent='Replay';}
-$('follow').onclick=()=>{stopReplay();following=true;paint();};
-$('timeline').oninput=()=>{stopReplay();following=false;selectedId=data.snapshots[Number($('timeline').value)]?.id;paint();};
+$('follow').onclick=()=>{stopReplay();following=true;inspectedStage=null;paint();};
+$('timeline').oninput=()=>{stopReplay();following=false;selectedId=shownSnapshots()[Number($('timeline').value)]?.id;paint();};
 $('replay').onclick=()=>{
   if(playback){stopReplay();paint();return;}
-  following=false;selectedId=data.snapshots[0]?.id;$('replay').textContent='Pause replay';paint();
-  playback=setInterval(()=>{if(loading)return;const index=data.snapshots.findIndex(s=>s.id===selectedId);if(index>=data.snapshots.length-1){stopReplay();paint();return;}selectedId=data.snapshots[index+1].id;paint();},1500);
+  following=false;selectedId=shownSnapshots()[0]?.id;$('replay').textContent='Pause replay';paint();
+  playback=setInterval(()=>{if(loading)return;const shots=shownSnapshots();const index=shots.findIndex(s=>s.id===selectedId);if(index>=shots.length-1){stopReplay();paint();return;}selectedId=shots[index+1].id;paint();},1500);
 };
 $('reset').onclick=reset;
 $('cameras').onclick=()=>{const visible=$('cameras').getAttribute('aria-pressed')!=='true';$('cameras').setAttribute('aria-pressed',String(visible));if(frustums)frustums.visible=visible;};
@@ -229,7 +287,38 @@ async function poll(){
       if(!run&&jobs.length){run=jobs[0].run;experiment=jobs[0].id.split('/')[1]==='experiments'?jobs[0].label:null;}
       $('build-job').value=run?(experiment?`${run}/experiments/${experiment}`:`${run}/model`):'';
     }
-    if(run){data=await fetchJSON(`/api/runs/${encodeURIComponent(run)}/construction`+(experiment?'?experiment='+encodeURIComponent(experiment):''));paint();}
+    if(run){
+      data=await fetchJSON(`/api/runs/${encodeURIComponent(run)}/construction`+(experiment?'?experiment='+encodeURIComponent(experiment):''));
+      if (experiment && data.state !== 'running' && !data.final_url) {
+        const scenePath = `experiments/${experiment}/model/scene.splat`;
+        if (!completedViewerUrl) {
+          // This local server routes GET, but its inherited HEAD handler does
+          // not resolve /files. Cancel the body after checking real headers.
+          const response = await fetch(`/files/${encodeURIComponent(run)}/${scenePath.split('/').map(encodeURIComponent).join('/')}`);
+          if (response.ok) completedViewerUrl = `/viewer/${encodeURIComponent(run)}?scene=${encodeURIComponent(scenePath)}&label=${encodeURIComponent(experiment)}`;
+          await response.body?.cancel();
+        }
+        data.final_url = completedViewerUrl;
+      }
+      // File reads also support dashboards started before visual reporting shipped.
+      if (!experiment) {
+        const root = `/files/${encodeURIComponent(run)}/`;
+        const readOptional = async path => {try {const response=await fetch(root+path, {cache:'no-store'});return response.ok ? await response.json() : null;} catch {return null;}};
+        if (!data.selection) {
+          data.selection = await readOptional('ingest/selection.json');
+          for (const record of data.selection?.records || []) if (/^[0-9a-f]{32}\.jpg$/.test(record.thumbnail || '')) record.url = root + 'ingest/selection-thumbnails/' + record.thumbnail;
+        }
+        if (!data.packaging && data.stage === 'package') data.packaging = await readOptional('construction-package.json');
+        if (!data.feature_preview && data.stage === 'sfm') data.feature_preview = await readOptional('sfm/features-preview.json');
+        if (!data.evaluation && (data.stage === 'evaluate' || inspectedStage === 'evaluate')) {
+          try {const detail = await fetchJSON(`/api/runs/${encodeURIComponent(run)}`); data.evaluation = detail.stages?.evaluate?.report;} catch {}
+        }
+        if (!data.evaluation_progress && (data.stage === 'evaluate' || inspectedStage === 'evaluate')) data.evaluation_progress = await readOptional('model/evaluation-progress.json');
+        data.evaluation_preview_root = root + 'model/evaluation-previews/';
+        data.manifest_url = root + 'archive/manifest.json';
+      }
+      paint();
+    }
   }catch(error){$('notice').textContent='Connection interrupted. Your last preview is retained. Reconnecting…';}
   setTimeout(poll,document.hidden?10000:2000);
 }

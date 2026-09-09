@@ -133,7 +133,7 @@ placement with generated geometry and textures. Per-object and per-material
 provenance is carried in the scene's node metadata — do not read it as a survey."""
 
 
-def _copy_tree(src: Path, dest: Path, *, description: str) -> int:
+def _copy_tree(src: Path, dest: Path, *, description: str, on_copied=None) -> int:
     if not src.exists():
         logger.warning("skipping %s — %s not found", description, src)
         return 0
@@ -141,6 +141,8 @@ def _copy_tree(src: Path, dest: Path, *, description: str) -> int:
     count = 0
     if src.is_file():
         shutil.copy2(src, dest / src.name)
+        if on_copied:
+            on_copied(src.name)
         return 1
     for item in sorted(src.rglob("*")):
         if item.is_file():
@@ -148,6 +150,8 @@ def _copy_tree(src: Path, dest: Path, *, description: str) -> int:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, target)
             count += 1
+            if on_copied:
+                on_copied(item.name)
     return count
 
 
@@ -254,19 +258,31 @@ def build_package(
     if output_root.exists():
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True)
+    from .construction import atomic_json
+    progress = dict(phase="Copying files", copied=0, checksummed=0, bytes=0, complete=False)
+    def publish():
+        try:
+            atomic_json(output_root.parent / "construction-package.json", progress)
+        except (OSError, ValueError):
+            logger.debug("Could not publish packaging progress", exc_info=True)
+    def copied(name):
+        progress.update(current=name, copied=progress["copied"] + 1)
+        publish()
+    publish()
 
     counts: dict[str, int] = {}
     counts["originals"] = sum(
-        _copy_tree(Path(src), output_root / "originals", description="originals")
+        _copy_tree(Path(src), output_root / "originals", description="originals", on_copied=copied)
         for src in originals
     )
-    counts["sfm"] = _copy_tree(Path(sfm_dir), output_root / "sfm", description="sparse model")
+    counts["sfm"] = _copy_tree(Path(sfm_dir), output_root / "sfm", description="sparse model", on_copied=copied)
     if database and Path(database).is_file():
         shutil.copy2(database, output_root / "sfm" / "database.db")
         counts["sfm"] += 1
-    counts["model"] = _copy_tree(Path(model_ply), output_root / "model", description="splat model")
+        copied("database.db")
+    counts["model"] = _copy_tree(Path(model_ply), output_root / "model", description="splat model", on_copied=copied)
     counts["derivatives"] = sum(
-        _copy_tree(Path(d), output_root / "derivatives", description="derivative")
+        _copy_tree(Path(d), output_root / "derivatives", description="derivative", on_copied=copied)
         for d in (derivatives or [])
     )
 
@@ -317,6 +333,9 @@ def build_package(
     for path in sorted(output_root.rglob("*")):
         if path.is_file():
             size = path.stat().st_size
+            progress.update(phase="Recording checksums", current=path.relative_to(output_root).as_posix(),
+                            checksummed=len(files), bytes=total_bytes)
+            publish()
             total_bytes += size
             files.append(
                 {
@@ -329,6 +348,8 @@ def build_package(
             )
 
     now = datetime.now(timezone.utc)
+    progress.update(checksummed=len(files), bytes=total_bytes)
+    publish()
     manifest = {
         "schema": "vitrine/preservation-package/1",
         "created_utc": now.isoformat(),
@@ -381,6 +402,8 @@ def build_package(
         "package: %d files, %.2f GB → %s",
         len(files), total_bytes / 2**30, output_root,
     )
+    progress.update(complete=True, phase="Manifest written", current=None)
+    publish()
     return PackageResult(output_root, len(files), total_bytes, manifest_path)
 
 

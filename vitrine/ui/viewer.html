@@ -142,6 +142,7 @@
   <div id="status-pill">Loading</div>
   <strong id="title">Explore in 3D</strong>
   <span class="muted" id="meta">Preparing the model…</span>
+  <a id="download-master" download>Download full-quality PLY</a>
   <div class="controls">
     <div><b>Drag</b> to look around</div>
     <div><b>Scroll</b> to move closer or farther</div>
@@ -174,10 +175,12 @@ const run = decodeURIComponent(
 const query = new URLSearchParams(location.search);
 const requestedScene = query.get('scene');
 const objectScene = requestedScene && requestedScene.startsWith('objects/') && requestedScene.endsWith('.splat') && !requestedScene.includes('..') && !requestedScene.includes('\\') ? requestedScene : null;
-const scenePath = objectScene || 'model/scene.splat';
+const experimentScene = requestedScene && /^experiments\/[^/\\]+\/(?:model\/)?scene\.splat$/.test(requestedScene) && !requestedScene.includes('..') ? requestedScene : null;
+const scenePath = objectScene || experimentScene || 'model/scene.splat';
 const splatUrl = new URL(`/files/${encodeURIComponent(run)}/${scenePath.split('/').map(encodeURIComponent).join('/')}`, location.origin).href;
-const plyPath = objectScene ? objectScene.replace(/\.splat$/, '.ply') : 'model/scene.ply';
+const plyPath = (objectScene || experimentScene) ? scenePath.replace(/\.splat$/, '.ply') : 'model/scene.ply';
 const plyUrl = new URL(`/files/${encodeURIComponent(run)}/${plyPath.split('/').map(encodeURIComponent).join('/')}`, location.origin).href;
+document.getElementById('download-master').href = plyUrl;
 
 function prettyName(name) {
   return String(name || 'Archived space')
@@ -295,15 +298,18 @@ async function tryGaussianViewer(frame, sceneUrl) {
     gpuAcceleratedSort: false,
     integerBasedSort: false,
     antialiased: true,
-    sphericalHarmonicsDegree: 0,
+    // Bundled WebGL shader supports degree 2; the PLY master retains SH3.
+    sphericalHarmonicsDegree: 2,
+    halfPrecisionCovariancesOnGPU: false,
   });
 
   meta.textContent = 'Opening the three-dimensional model…';
   setStatus('Opening model');
   setProgress(0.75);
   await viewer.addSplatScene(sceneUrl, {
-    format: GaussianSplats3D.SceneFormat.Splat,
-    splatAlphaRemovalThreshold: 1,
+    format: GaussianSplats3D.SceneFormat.Ply,
+    splatAlphaRemovalThreshold: 0,
+    sphericalHarmonicsDegree: 2,
     showLoadingUI: false,
     progressiveLoad: false,
     onProgress: (pct) => {
@@ -318,7 +324,7 @@ async function tryGaussianViewer(frame, sceneUrl) {
   setProgress(1);
   setStatus('Ready to explore', true);
   meta.textContent =
-    `${frame.n.toLocaleString()} splats · ${(frame.bytes / 2 ** 20).toFixed(1)} MB · viewing derivative`;
+    `Full PLY geometry · SH2 browser shading · SH3 preserved in master download`;
   return viewer;
 }
 
@@ -405,7 +411,7 @@ async function pointCloudFallback(buf, frame) {
 
 async function main() {
   try {
-    const cameraPath = objectScene ? objectScene.replace(/[^/]+$/, 'viewer-cameras.json') : 'model/viewer-cameras.json';
+    const cameraPath = (objectScene || experimentScene) ? scenePath.replace(/[^/]+$/, 'viewer-cameras.json') : 'model/viewer-cameras.json';
     const response = await fetch(new URL(`/files/${encodeURIComponent(run)}/${cameraPath}`,location.origin));
     if(response?.ok) {
       const data = await response.json();
@@ -464,7 +470,7 @@ async function main() {
   );
 
   try {
-    await tryGaussianViewer(frame, blobUrl);
+    await tryGaussianViewer(frame, plyUrl);
   } catch (gsErr) {
     console.warn('GaussianSplats3D failed, using point-cloud fallback', gsErr);
     errEl.textContent = '';

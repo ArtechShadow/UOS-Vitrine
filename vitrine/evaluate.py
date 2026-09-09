@@ -86,6 +86,7 @@ def evaluate_ply(
     *,
     indices: list[int] | None = None,
     max_long_edge: int = 1600,
+    on_view=None,
 ) -> EvaluationReport:
     """Render each view from a saved PLY and measure it against the photograph."""
     import torch
@@ -132,6 +133,11 @@ def evaluate_ply(
                     reference_sharpness=_sharpness(batch.image.cpu().numpy()),
                 )
             )
+            if on_view:
+                try:
+                    on_view(results[-1], image, batch.image, len(results), len(chosen))
+                except Exception:
+                    logger.warning("Evaluation preview unavailable", exc_info=True)
 
     grouped: dict[str, list[ViewMetrics]] = defaultdict(list)
     for item in results:

@@ -45,7 +45,7 @@ def observe_line(progress, line):
     extracted = re.search(r"Processed file \[(\d+)/(\d+)\]", line)
     if extracted:
         values.update(count=int(extracted[1]), total=int(extracted[2]), unit="images")
-    matching = re.search(r"Matching block \[(\d+)/(\d+),\s*(\d+)/(\d+)\]", line)
+    matching = re.search(r"(?:Matching|Processing) block \[(\d+)/(\d+),\s*(\d+)/(\d+)\]", line)
     if matching:
         values.update(count=(int(matching[1])-1)*int(matching[4])+int(matching[3]),
                       total=int(matching[2])*int(matching[4]), unit="blocks")

@@ -27,10 +27,11 @@ def activity(runs_root: Path):
         for folder in candidates:
             if folder.is_symlink():
                 continue
-            progress = read_json(folder / "progress.json")
-            complete = read_json(folder / "train.json")
+            training = folder / "model" if (folder / "model").is_dir() and not (folder / "model").is_symlink() else folder
+            progress = read_json(training / "progress.json")
+            complete = read_json(training / "train.json")
             snapshots = []
-            for path in sorted((folder / "construction").glob("step-*.json")):
+            for path in sorted((training / "construction").glob("step-*.json")):
                 metadata = read_json(path)
                 picture = path.with_suffix(".jpg")
                 if metadata and picture.is_file() and not picture.is_symlink():
@@ -42,7 +43,7 @@ def activity(runs_root: Path):
             if not progress and not snapshots and not construction["snapshots"] and not construction.get("heartbeat") and (not complete or folder.name == "model"):
                 continue
             data = complete or progress or {}
-            stamp_path = folder / ("train.json" if complete else "progress.json")
+            stamp_path = training / ("train.json" if complete else "progress.json")
             try:
                 stamp = stamp_path.stat().st_mtime
             except OSError:
