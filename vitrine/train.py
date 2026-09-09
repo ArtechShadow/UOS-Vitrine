@@ -32,6 +32,7 @@ import math
 import os
 import subprocess
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -43,10 +44,13 @@ from . import cuda_toolkit
 from .colmap_io import Model
 from .dataset import ViewSet
 from .losses import photometric_loss, psnr, ssim
-from .ply import SH_C0, sh_coefficient_count, write_splat_ply
+from .ply import SH_C0, sh_coefficient_count, verify_splat_ply, write_splat_ply
 from .profiles import Profile
 
 logger = logging.getLogger(__name__)
+
+TRAINING_SAVE_SCHEMA = "vitrine/training-save/1"
+TRAINING_PLY_FORMAT = "vitrine/gaussian-ply/binary-little-endian-1.0"
 
 # --- Optimiser settings, from the reference implementation -------------------
 # Position LR is scaled by scene extent: COLMAP units are arbitrary, so a fixed
@@ -243,26 +247,166 @@ class TrainReport:
     sh_degree: int
     minutes: float
     peak_vram_gb: float
-    final_psnr: float
-    final_ssim: float
+    final_psnr: float | None
+    final_ssim: float | None
     #: Quality of the model as *exported* — after the scale ceiling is applied.
     #: Equals ``final_psnr`` when the clamp is inert, which is the healthy case.
-    export_psnr: float = 0.0
-    export_ssim: float = 0.0
+    export_psnr: float | None = None
+    export_ssim: float | None = None
     scale_clamped_fraction: float = 0.0
     alive_fraction: float = 0.0
     #: Median max/min axis ratio over Gaussians that still render. The Luma
     #: reference capture sits near 12; runaway values mean needle splats that
     #: fit the training views and break between them.
-    live_anisotropy_median: float = 0.0
+    live_anisotropy_median: float | None = None
     energy_kwh: float = 0.0
     cost_gbp: float = 0.0
     electricity_rate_gbp_per_kwh: float = 0.0
     history: list[dict] = field(default_factory=list)
     ply_path: str = ""
+    state: str = "complete"
+    evaluation_state: str = "complete"
+    evaluation_error: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    save_receipt: dict = field(default_factory=dict)
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2)
+        return json.dumps(_json_safe(asdict(self)), indent=2, allow_nan=False)
+
+
+def _json_safe(value):
+    """Convert non-finite metric values to explicit JSON ``null`` values."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _update_training_save_state(output_dir: Path, *, state: str, **fields) -> dict:
+    """Durably publish training/save lifecycle metadata.
+
+    This record is deliberately separate from ``train.json``.  It is written
+    before final evaluation so a process that disappears after saving still
+    leaves a truthful, machine-readable recovery point.  Metadata failure is
+    logged but never turns a verified scene artifact into a failed one.
+    """
+    from .construction import atomic_json, read_json
+
+    path = Path(output_dir) / "save-state.json"
+    previous = read_json(path) or {}
+    payload = {
+        **previous,
+        "schema": TRAINING_SAVE_SCHEMA,
+        "format": TRAINING_PLY_FORMAT,
+        "state": state,
+        "updated": time.time(),
+        **fields,
+    }
+    try:
+        atomic_json(path, _json_safe(payload))
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not persist training save state: %s", exc)
+    return payload
+
+
+def _write_train_report(output_dir: Path, report: TrainReport) -> None:
+    """Publish ``train.json`` atomically after all required fields are known."""
+    from .construction import atomic_json
+
+    atomic_json(Path(output_dir) / "train.json", _json_safe(asdict(report)))
+
+
+def save_master(
+    params: dict[str, torch.nn.Parameter],
+    output_dir: Path,
+    sh_degree: int,
+    scene_scale: float,
+    *,
+    generation: str | None = None,
+    checkpoint_failures: list[dict] | None = None,
+) -> tuple[Path, dict]:
+    """Write, verify and publish the immutable training master boundary.
+
+    The caller may continue with evaluation or packaging only after this
+    function returns.  ``write_splat_ply`` writes to an adjacent unique
+    temporary and validates it before replacement, so an existing master is
+    retained if any save or promotion step fails.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generation = generation or uuid.uuid4().hex
+    if checkpoint_failures is None:
+        checkpoint_failures = []
+    path = output_dir / "scene.ply"
+    started = time.time()
+    # A previous successful save may have left a verified receipt in this
+    # record.  Clear the *current* receipt before opening the replacement so a
+    # process that disappears in the writer cannot be mistaken for a successful
+    # save.  Keep the old receipt separately as recovery evidence: the atomic
+    # PLY writer leaves that previous file untouched until promotion succeeds.
+    from .construction import read_json
+    prior_state = read_json(output_dir / "save-state.json") or {}
+    prior_artifact = prior_state.get("artifact") if isinstance(prior_state, dict) else None
+    prior_verified = bool(prior_state.get("verified")) if isinstance(prior_state, dict) else False
+    previous_artifact = prior_artifact if prior_verified and isinstance(prior_artifact, dict) else None
+    _update_training_save_state(
+        output_dir,
+        state="saving",
+        generation=generation,
+        pid=os.getpid(),
+        save_started=started,
+        evaluation_state="pending",
+        checkpoint_failures=checkpoint_failures,
+        artifact=None,
+        verified=False,
+        previous_artifact=previous_artifact,
+    )
+    try:
+        _write(params, path, sh_degree, scene_scale)
+        receipt = verify_splat_ply(
+            path,
+            expected_count=len(params["means"]),
+            expected_sh_degree=sh_degree,
+            require_nonempty=True,
+        )
+    except BaseException as exc:
+        _update_training_save_state(
+            output_dir,
+            state="save_failed",
+            generation=generation,
+            pid=os.getpid(),
+            save_finished=time.time(),
+            error=f"{type(exc).__name__}: {exc}",
+            verified=False,
+            artifact=None,
+            checkpoint_failures=checkpoint_failures,
+        )
+        raise
+    artifact = {
+        "path": path.name,
+        "bytes": receipt["bytes"],
+        "count": receipt["count"],
+        "sh_degree": receipt["sh_degree"],
+        "sha256": receipt["sha256"],
+        "format": receipt["format"],
+    }
+    _update_training_save_state(
+        output_dir,
+        state="master_saved",
+        generation=generation,
+        pid=os.getpid(),
+        save_finished=time.time(),
+        save_seconds=round(time.time() - started, 3),
+        artifact=artifact,
+        verified=True,
+        previous_artifact=None,
+        checkpoint_failures=checkpoint_failures,
+        evaluation_state="pending",
+    )
+    return path, artifact
 
 
 def _write_progress(
@@ -514,6 +658,18 @@ def _train_impl(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    generation = uuid.uuid4().hex
+    warnings: list[str] = []
+    checkpoint_failures: list[dict] = []
+    _update_training_save_state(
+        output_dir,
+        state="training",
+        generation=generation,
+        pid=os.getpid(),
+        started=time.time(),
+        artifact=None,
+        evaluation_state="pending",
+    )
     torch.manual_seed(seed)
     generator = torch.Generator().manual_seed(seed)
 
@@ -829,31 +985,136 @@ def _train_impl(
                 )
 
             if eval_every and step > 0 and step % eval_every == 0:
-                eval_psnr, eval_ssim = evaluate(params, views, profile.sh_degree, limit=8,
-                    construction_dir=output_dir / "construction", construction_step=step)
-                result = EvalResult(step, eval_psnr, eval_ssim, len(params["means"]))
-                history.append(result)
-                logger.info("eval  %s", result.line())
-                _write_progress(
-                    output_dir, profile=profile, step=step, n_gaussians=len(params["means"]),
-                    loss=float(loss.detach()), l1_value=l1_value, ssim_value=ssim_value,
-                    started=started, history=history, energy_kwh=energy_kwh,
-                )
+                try:
+                    eval_psnr, eval_ssim = evaluate(
+                        params,
+                        views,
+                        profile.sh_degree,
+                        limit=8,
+                        construction_dir=output_dir / "construction",
+                        construction_step=step,
+                    )
+                    if not (math.isfinite(eval_psnr) and math.isfinite(eval_ssim)):
+                        raise RuntimeError("intermediate evaluation returned no finite metrics")
+                    result = EvalResult(step, eval_psnr, eval_ssim, len(params["means"]))
+                    history.append(result)
+                    logger.info("eval  %s", result.line())
+                    _write_progress(
+                        output_dir, profile=profile, step=step, n_gaussians=len(params["means"]),
+                        loss=float(loss.detach()), l1_value=l1_value, ssim_value=ssim_value,
+                        started=started, history=history, energy_kwh=energy_kwh,
+                    )
+                except Exception as exc:
+                    warning = f"intermediate evaluation at step {step} failed: {exc}"
+                    warnings.append(warning)
+                    logger.warning(warning)
+                    _update_training_save_state(
+                        output_dir,
+                        state="training",
+                        latest_evaluation={
+                            "step": step,
+                            "state": "failed",
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "recorded_at": time.time(),
+                        },
+                    )
 
             if save_every and step > 0 and step % save_every == 0:
-                _write(params, output_dir / f"checkpoint_{step}.ply", profile.sh_degree, scene_scale)
+                checkpoint = output_dir / f"checkpoint_{step}.ply"
+                try:
+                    _write(params, checkpoint, profile.sh_degree, scene_scale)
+                    receipt = verify_splat_ply(
+                        checkpoint,
+                        expected_count=len(params["means"]),
+                        expected_sh_degree=profile.sh_degree,
+                        require_nonempty=True,
+                    )
+                    _update_training_save_state(
+                        output_dir,
+                        state="training",
+                        latest_checkpoint={
+                            "step": step,
+                            "path": checkpoint.name,
+                            "bytes": receipt["bytes"],
+                            "count": receipt["count"],
+                            "sh_degree": receipt["sh_degree"],
+                            "sha256": receipt["sha256"],
+                        },
+                        checkpoint_failures=checkpoint_failures,
+                    )
+                except Exception as exc:
+                    # Checkpoints are recovery aids; an individual checkpoint
+                    # failure must not destroy the in-memory run or overwrite a
+                    # previous checkpoint.  The final master remains a required
+                    # gate and will still fail loudly if it cannot be verified.
+                    failure = {
+                        "step": step,
+                        "path": checkpoint.name,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "recorded_at": time.time(),
+                    }
+                    checkpoint_failures.append(failure)
+                    warnings.append(f"checkpoint {step} was not saved: {exc}")
+                    logger.warning("checkpoint %d unavailable; continuing training: %s", step, exc)
+                    _update_training_save_state(
+                        output_dir,
+                        state="training",
+                        checkpoint_failures=checkpoint_failures,
+                    )
 
     minutes = (time.time() - started) / 60.0
     # Retain the completed model before final evaluation. Metrics can be
     # recomputed from a saved file if the process is interrupted afterwards.
-    ply_path = _write(params, output_dir / "scene.ply", profile.sh_degree, scene_scale)
+    ply_path, artifact = save_master(
+        params,
+        output_dir,
+        profile.sh_degree,
+        scene_scale,
+        generation=generation,
+        checkpoint_failures=checkpoint_failures,
+    )
+    observer.update(stage="saved", substage="master", step=profile.iterations,
+                    total=profile.iterations, message="Verified master PLY saved")
     observer.preview.capture(params, profile.iterations, force=True)
     observer.update(stage="evaluate", step=profile.iterations, total=profile.iterations,
                     message="Measuring reconstruction quality")
-    final_psnr, final_ssim = evaluate(params, views, profile.sh_degree,
-        construction_dir=output_dir / "construction", construction_step=profile.iterations)
-    logger.info("final eval over %d held-out views: PSNR %.2f dB, SSIM %.4f",
-                len(views.eval_indices), final_psnr, final_ssim)
+    from .pipeline import check_cancel
+    check_cancel(output_dir.parent)
+    final_psnr: float | None = None
+    final_ssim: float | None = None
+    export_psnr: float | None = None
+    export_ssim: float | None = None
+    evaluation_state = "pending"
+    evaluation_error: str | None = None
+    try:
+        final_psnr, final_ssim = evaluate(
+            params,
+            views,
+            profile.sh_degree,
+            construction_dir=output_dir / "construction",
+            construction_step=profile.iterations,
+        )
+        if not (math.isfinite(final_psnr) and math.isfinite(final_ssim)):
+            raise RuntimeError("evaluation returned no finite metrics; held-out evidence is insufficient")
+        evaluation_state = "complete"
+        logger.info("final eval over %d held-out views: PSNR %.2f dB, SSIM %.4f",
+                    len(views.eval_indices), final_psnr, final_ssim)
+    except Exception as exc:
+        evaluation_state = "failed"
+        evaluation_error = f"{type(exc).__name__}: {exc}"
+        warnings.append(f"final evaluation failed after master save: {exc}")
+        logger.warning("final evaluation failed after master save; scene remains usable: %s", exc)
+        _update_training_save_state(
+            output_dir,
+            state="master_saved_evaluation_failed",
+            generation=generation,
+            artifact=artifact,
+            verified=True,
+            evaluation_state=evaluation_state,
+            evaluation_error=evaluation_error,
+            checkpoint_failures=checkpoint_failures,
+        )
+    check_cancel(output_dir.parent)
 
     # Export applies a hard scale ceiling, so the file that ships is not
     # necessarily the model that was just scored. On a run where scales have
@@ -872,36 +1133,45 @@ def _train_impl(
             ratios = torch.exp(log_scales.amax(dim=-1) - log_scales.amin(dim=-1))
             live_anisotropy_median = float(ratios.median())
         else:
-            live_anisotropy_median = float("nan")
+            live_anisotropy_median = None
     # Even a tiny altered fraction can cover a large visible surface. The
     # video appearance-on experiment altered ~0.074% but its saved PLY was
     # 0.23 dB below the raw-model score. Never assume a small count is free.
-    if clamped_fraction > 0.0:
+    if evaluation_state == "complete" and clamped_fraction > 0.0:
         export_params = dict(params)
         export_params["scales"] = torch.nn.Parameter(params["scales"].clamp(max=ceiling))
-        export_psnr, export_ssim = evaluate(export_params, views, profile.sh_degree)
-        logger.info(
-            "export clamp touches %.1f%% of Gaussians: %.2f dB / %.4f after clamping (%.2f dB cost)",
-            clamped_fraction * 100, export_psnr, export_ssim, final_psnr - export_psnr,
-        )
-        if EXPORT_CLAMP_STUDY:
-            # The ceiling is a judgement call about how much a handful of very
-            # large Gaussians are allowed to fog a viewer, and it is charged
-            # against a metric nobody was measuring. Price it.
-            for fraction in EXPORT_CLAMP_STUDY:
-                trial = dict(params)
-                trial["scales"] = torch.nn.Parameter(
-                    params["scales"].clamp(max=math.log(fraction * scene_scale))
-                )
-                trial_psnr, trial_ssim = evaluate(trial, views, profile.sh_degree, limit=16)
-                touched = float(
-                    (params["scales"] > math.log(fraction * scene_scale)).any(dim=1).float().mean()
-                )
-                logger.info(
-                    "  clamp study: max_scale_fraction %.3f -> %.2f dB / %.4f (%.2f%% touched)",
-                    fraction, trial_psnr, trial_ssim, touched * 100,
-                )
-    else:
+        try:
+            export_psnr, export_ssim = evaluate(export_params, views, profile.sh_degree)
+            if not (math.isfinite(export_psnr) and math.isfinite(export_ssim)):
+                raise RuntimeError("export-clamp evaluation returned no finite metrics")
+            logger.info(
+                "export clamp touches %.1f%% of Gaussians: %.2f dB / %.4f after clamping (%.2f dB cost)",
+                clamped_fraction * 100, export_psnr, export_ssim, final_psnr - export_psnr,
+            )
+            if EXPORT_CLAMP_STUDY:
+                # The ceiling is a judgement call about how much a handful of
+                # very large Gaussians are allowed to fog a viewer, and it is
+                # charged against a metric nobody was measuring. Price it.
+                for fraction in EXPORT_CLAMP_STUDY:
+                    trial = dict(params)
+                    trial["scales"] = torch.nn.Parameter(
+                        params["scales"].clamp(max=math.log(fraction * scene_scale))
+                    )
+                    trial_psnr, trial_ssim = evaluate(trial, views, profile.sh_degree, limit=16)
+                    touched = float(
+                        (params["scales"] > math.log(fraction * scene_scale)).any(dim=1).float().mean()
+                    )
+                    logger.info(
+                        "  clamp study: max_scale_fraction %.3f -> %.2f dB / %.4f (%.2f%% touched)",
+                        fraction, trial_psnr, trial_ssim, touched * 100,
+                    )
+        except Exception as exc:
+            export_psnr = export_ssim = None
+            evaluation_state = "partial"
+            evaluation_error = f"{type(exc).__name__}: {exc}"
+            warnings.append(f"exported-model evaluation failed after master save: {exc}")
+            logger.warning("exported-model evaluation failed after master save: %s", exc)
+    elif evaluation_state == "complete":
         export_psnr, export_ssim = final_psnr, final_ssim
     logger.info(
         "alive Gaussians at finish: %.1f%%, median live anisotropy %.1f",
@@ -912,6 +1182,7 @@ def _train_impl(
     logger.info("energy: %.3f kWh (~£%.2f at £%.4f/kWh)", energy_kwh, energy_kwh * rate, rate)
 
     peak_vram = torch.cuda.max_memory_allocated() / 2**30 if device.startswith("cuda") else 0.0
+    report_state = "complete" if evaluation_state == "complete" and not warnings else "complete_with_warnings"
     report = TrainReport(
         profile=profile.name,
         iterations=profile.iterations,
@@ -922,21 +1193,46 @@ def _train_impl(
         sh_degree=profile.sh_degree,
         minutes=round(minutes, 1),
         peak_vram_gb=round(peak_vram, 2),
-        final_psnr=round(final_psnr, 3),
-        final_ssim=round(final_ssim, 4),
-        export_psnr=round(export_psnr, 3),
-        export_ssim=round(export_ssim, 4),
+        final_psnr=round(final_psnr, 3) if final_psnr is not None else None,
+        final_ssim=round(final_ssim, 4) if final_ssim is not None else None,
+        export_psnr=round(export_psnr, 3) if export_psnr is not None else None,
+        export_ssim=round(export_ssim, 4) if export_ssim is not None else None,
         scale_clamped_fraction=round(clamped_fraction, 4),
         alive_fraction=round(alive_fraction, 4),
-        live_anisotropy_median=round(live_anisotropy_median, 2),
+        live_anisotropy_median=(round(live_anisotropy_median, 2)
+                               if live_anisotropy_median is not None else None),
         energy_kwh=round(energy_kwh, 3),
         cost_gbp=round(energy_kwh * rate, 2),
         electricity_rate_gbp_per_kwh=rate,
         history=[asdict(h) for h in history],
         ply_path=str(ply_path),
+        state=report_state,
+        evaluation_state=evaluation_state,
+        evaluation_error=evaluation_error,
+        warnings=warnings,
+        save_receipt=artifact,
     )
-    (output_dir / "train.json").write_text(report.to_json(), encoding="utf-8")
-    (output_dir / "progress.json").unlink(missing_ok=True)  # train.json is authoritative now
+    _write_train_report(output_dir, report)
+    _update_training_save_state(
+        output_dir,
+        state="complete" if evaluation_state == "complete" else "master_saved_with_evaluation_warning",
+        generation=generation,
+        artifact=artifact,
+        verified=True,
+        evaluation_state=evaluation_state,
+        evaluation_error=evaluation_error,
+        checkpoint_failures=checkpoint_failures,
+        warnings=warnings,
+        report_published=True,
+        pid=os.getpid(),
+    )
+    try:
+        (output_dir / "progress.json").unlink(missing_ok=True)  # train.json is authoritative now
+    except OSError as exc:
+        # A stale progress file is harmless once the verified report exists;
+        # do not turn a successful master/report publication into a failed stage
+        # merely because cleanup lost a race with another reader.
+        logger.warning("could not remove obsolete progress.json: %s", exc)
     logger.info("training complete in %.1f min — %s", minutes, ply_path)
     return report
 
@@ -948,7 +1244,7 @@ def _write(
     scene_scale: float,
 ) -> Path:
     detached = {k: v.detach().cpu().numpy() for k, v in params.items()}
-    return write_splat_ply(
+    output = write_splat_ply(
         path,
         means=detached["means"],
         scales=detached["scales"],
@@ -959,3 +1255,10 @@ def _write(
         sh_degree=sh_degree,
         max_scale=MAX_SCALE_FRACTION * scene_scale,
     )
+    # ``write_splat_ply`` validates its temporary file before replacement;
+    # reopen the published path as a final trust-boundary check and checksum
+    # source for the recovery record.  Keep this helper's historical Path
+    # return type for engine callers.
+    verify_splat_ply(output, expected_count=len(detached["means"]),
+                     expected_sh_degree=sh_degree, require_nonempty=True)
+    return output

@@ -6,6 +6,7 @@ training checkpoints are deliberately outside this namespace.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -18,6 +19,28 @@ from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
+STATUS_SCHEMA = "vitrine/construction-status/1"
+DEFAULT_HEARTBEAT_SECONDS = 2.0
+DEFAULT_STALE_SECONDS = 30.0
+
+_TRAINING_SAVE_SCHEMA = "vitrine/training-save/1"
+_VERIFIED_MASTER_STATES = frozenset({
+    "master_saved",
+    "master_saved_evaluation_failed",
+    "master_saved_with_evaluation_warning",
+    "complete",
+})
+_STAGE_OUTPUTS = {
+    "ingest": ("ingest/ingest.json",),
+    "sfm": ("sfm/sfm.json", "sfm/sparse_text/cameras.txt",
+            "sfm/sparse_text/images.txt", "sfm/sparse_text/points3D.txt"),
+    "train": ("model/train.json", "model/scene.ply"),
+    "evaluate": ("model/evaluation.json",),
+    "cleanup": ("model/scene.cleaned.ply",),
+    "export": ("model/scene.splat",),
+    "package": ("archive/manifest.json",),
+}
+
 
 def read_json(path):
     try:
@@ -27,15 +50,182 @@ def read_json(path):
         return None
 
 
+def _sha256_file(path: Path, size: int, mtime_ns: int, inode: int) -> str:
+    """Hash a status artefact once per observed file generation.
+
+    ``construction_payload`` is polled by the dashboard.  Caching by the
+    immutable file metadata avoids re-reading a several-hundred-megabyte
+    master on every poll while still invalidating an atomic replacement or a
+    normal in-place edit.
+    """
+    del size, mtime_ns, inode  # metadata is part of the cache key
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+# A bounded manual cache keeps this module compatible with older Python builds
+# while avoiding unbounded entries for repeated experimental runs.
+_FILE_DIGEST_CACHE: dict[tuple[str, int, int, int], str] = {}
+
+
+def _file_digest(path: Path) -> str | None:
+    try:
+        stat = Path(path).stat()
+        if not Path(path).is_file() or Path(path).is_symlink():
+            return None
+        key = (str(Path(path).resolve()), int(stat.st_size),
+               int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1e9))),
+               int(getattr(stat, "st_ino", 0)))
+        cached = _FILE_DIGEST_CACHE.get(key)
+        if cached is not None:
+            return cached
+        value = _sha256_file(Path(path), key[1], key[2], key[3])
+        if len(_FILE_DIGEST_CACHE) >= 128:
+            _FILE_DIGEST_CACHE.pop(next(iter(_FILE_DIGEST_CACHE)))
+        _FILE_DIGEST_CACHE[key] = value
+        return value
+    except OSError:
+        return None
+
+
+def _verified_master_artifact(training: Path, save_state: dict | None) -> dict | None:
+    """Return the current master receipt only after its marker and digest agree."""
+    if not isinstance(save_state, dict):
+        return None
+    if (save_state.get("schema") != _TRAINING_SAVE_SCHEMA
+            or save_state.get("state") not in _VERIFIED_MASTER_STATES
+            or save_state.get("verified") is not True):
+        return None
+    artifact = save_state.get("artifact")
+    if not isinstance(artifact, dict) or artifact.get("path") != "scene.ply":
+        return None
+    expected = artifact.get("sha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+        return None
+    path = Path(training) / "scene.ply"
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        if artifact.get("bytes") != path.stat().st_size:
+            return None
+    except OSError:
+        return None
+    actual = _file_digest(path)
+    if actual is None or actual != expected.lower():
+        return None
+    return dict(artifact, sha256=actual)
+
+
+def _stage_outputs_match(run_dir: Path, name: str, record: dict, marker_done: bool) -> bool:
+    """Require a complete pipeline marker, output fingerprint and files."""
+    if not marker_done or record.get("state") != "complete":
+        return False
+    outputs = record.get("outputs")
+    required = _STAGE_OUTPUTS.get(name)
+    if not isinstance(outputs, dict) or not required:
+        return False
+    for relative in required:
+        expected = outputs.get(relative)
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+            return False
+        path = Path(run_dir) / relative
+        if _file_digest(path) != expected.lower():
+            return False
+    return True
+
+
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
     try:
-        tmp.write_text(json.dumps(value, allow_nan=False), encoding="utf-8")
+        encoded = json.dumps(value, allow_nan=False)
+        with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
         tmp.replace(path)
+        if os.name != "nt":
+            try:
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                logger.debug("Could not fsync JSON parent directory", exc_info=True)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def process_alive(pid):
+    """Return whether a process id is currently alive when the OS can tell us."""
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # The process exists but belongs to another user.  Do not turn that
+        # into an ``unknown`` status while a legitimate worker is running.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def recover_stale_progress(folder, *, stale_after=DEFAULT_STALE_SECONDS, now=None):
+    """Mark a vanished or silent worker ``unknown`` while retaining its record.
+
+    A process can disappear before its ``finally`` block writes a terminal
+    status (for example during a native CUDA call).  Leaving ``running`` in the
+    status file makes a failed run look active forever and can make a browser
+    report false progress.  This helper writes an explicit diagnostic and is
+    idempotent; a live worker is never changed.
+    """
+    path = Path(folder)
+    if path.is_dir():
+        status_path = path / "construction-status.json"
+    elif path.name == "construction-status.json":
+        status_path = path
+    else:
+        status_path = path
+    status = read_json(status_path)
+    if not status or status.get("state") != "running":
+        return status
+    now = time.time() if now is None else float(now)
+    heartbeat = status.get("heartbeat", status.get("started", 0))
+    try:
+        age = max(0.0, now - float(heartbeat))
+    except (TypeError, ValueError):
+        age = float("inf")
+    alive = process_alive(status.get("pid"))
+    vanished = alive is False
+    silent = age > float(stale_after)
+    if not vanished and not silent:
+        return status
+    reason = "worker process is no longer alive" if vanished else (
+        f"no heartbeat for {age:.1f}s (threshold {float(stale_after):.1f}s)"
+    )
+    updated = dict(status)
+    updated.update(
+        state="unknown",
+        failure_kind="worker_disappeared" if vanished else "heartbeat_timeout",
+        error=f"Construction worker status is unknown: {reason}",
+        recovered_at=now,
+        heartbeat=now,
+    )
+    try:
+        atomic_json(status_path, updated)
+    except (OSError, ValueError):
+        logger.debug("Could not persist stale construction status", exc_info=True)
+    return updated
 
 
 def snapshot_records(path):
@@ -49,11 +239,34 @@ def snapshot_records(path):
 
 
 class Progress:
-    """Heartbeat continues during long native calls; errors remain observable."""
+    """Durable worker lifecycle with heartbeats during long native calls."""
 
-    def __init__(self, folder, stage):
+    def __init__(self, folder, stage, *, heartbeat_seconds=None):
         self.path = Path(folder) / "construction-status.json"
-        self.data = {"stage": stage, "state": "running", "started": time.time()}
+        interval = heartbeat_seconds
+        if interval is None:
+            try:
+                interval = float(os.environ.get("VITRINE_HEARTBEAT_SECONDS", DEFAULT_HEARTBEAT_SECONDS))
+            except ValueError:
+                interval = DEFAULT_HEARTBEAT_SECONDS
+        self.heartbeat_seconds = max(0.1, float(interval))
+        previous = recover_stale_progress(self.path)
+        started = time.time()
+        self.data = {
+            "schema": STATUS_SCHEMA,
+            "stage": stage,
+            "state": "running",
+            "started": started,
+            "heartbeat": started,
+            "pid": os.getpid(),
+        }
+        if previous and previous.get("state") == "unknown":
+            self.data["recovered_from"] = {
+                "state": previous.get("state"),
+                "failure_kind": previous.get("failure_kind"),
+                "pid": previous.get("pid"),
+                "recovered_at": previous.get("recovered_at"),
+            }
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self._heartbeat, daemon=True)
@@ -67,7 +280,7 @@ class Progress:
                 logger.debug("Could not publish construction status", exc_info=True)
 
     def _heartbeat(self):
-        while not self.stop.wait(2):
+        while not self.stop.wait(self.heartbeat_seconds):
             self.update()
 
     def __enter__(self):
@@ -78,8 +291,13 @@ class Progress:
     def __exit__(self, typ, exc, tb):
         self.stop.set()
         self.thread.join()
-        self.update(state="cancelled" if isinstance(exc, KeyboardInterrupt) else "failed" if exc else "complete",
-                    error=str(exc) if exc else None, seconds=time.time()-self.data["started"])
+        final_state = "cancelled" if isinstance(exc, KeyboardInterrupt) else "failed" if exc else "complete"
+        self.update(
+            state=final_state,
+            error=str(exc) if exc else None,
+            seconds=time.time() - self.data["started"],
+            finished=time.time(),
+        )
 
 
 class SnapshotStore:
@@ -214,12 +432,12 @@ def construction_payload(run_dir, process=None, folder=None):
     if folder is not None and (training / "model").is_dir() and not (training / "model").is_symlink():
         training = training / "model"
     folders = [run_dir, run_dir / "ingest", run_dir / "sfm", training] if folder is None else [training]
-    statuses = [s for p in folders if (s := read_json(p / "construction-status.json"))]
+    statuses = [s for p in folders if (s := recover_stale_progress(p))]
     latest = max(statuses, key=lambda s: s.get("heartbeat", 0), default={})
-    pipeline = read_json(run_dir / "construction-status.json") if folder is None else None
+    pipeline = recover_stale_progress(run_dir) if folder is None else None
     if pipeline and pipeline.get("state") == "running":
         child = {"ingest": run_dir / "ingest", "sfm": run_dir / "sfm", "train": training, "evaluate": training}.get(pipeline.get("stage"))
-        candidate = read_json(child / "construction-status.json") if child else None
+        candidate = recover_stale_progress(child) if child else None
         latest = candidate if candidate and candidate.get("started", 0) >= pipeline.get("started", 0) else pipeline
     payload = dict(latest)
     if folder is None:
@@ -234,6 +452,8 @@ def construction_payload(run_dir, process=None, folder=None):
         payload["selection"] = selection
     progress = read_json(training / "progress.json") or {}
     complete = read_json(training / "train.json")
+    save_state = read_json(training / "save-state.json")
+    master_artifact = _verified_master_artifact(training, save_state)
     snapshots, images = [], []
     roots = [run_dir, run_dir / "sfm", training] if folder is None else [training]
     for root in roots:
@@ -254,8 +474,12 @@ def construction_payload(run_dir, process=None, folder=None):
         snapshots = [{**entry, "id": entry["url"], "kind": "render",
                       "created": entry.get("recorded_at", 0)} for entry in images]
     payload.update(snapshots=snapshots, images=images, training=complete or progress,
+                   save_state=save_state,
                    preview_error=read_json(training / "construction-preview-error.json") or payload.get("preview_error"))
-    payload["evaluation"] = read_json(training / "evaluation.json")
+    payload["master_saved"] = master_artifact is not None
+    payload["master_artifact"] = master_artifact
+    evaluation = read_json(training / "evaluation.json")
+    payload["evaluation"] = evaluation
     payload['postprocessing'] = [dict(folder=name, **status) for name in ('object-meshes','scene-mesh','pbr')
                                  if (status := read_json(run_dir/name/'construction-status.json'))]
     payload['surface_assets'] = []
@@ -279,8 +503,10 @@ def construction_payload(run_dir, process=None, folder=None):
                                     checksummed=manifest.get("file_count"), bytes=manifest.get("total_bytes"))
         payload["manifest_url"] = "/files/" + quote(run_dir.name, safe="") + "/archive/manifest.json"
     done = {"ingest": (run_dir / "ingest/ingest.json").is_file(),
-            "sfm": (run_dir / "sfm/sfm.json").is_file(), "train": bool(complete),
-            "evaluate": (training / "evaluation.json").is_file() or bool(complete and complete.get("final_psnr") is not None),
+            "sfm": (run_dir / "sfm/sfm.json").is_file(),
+            "train": bool(complete and master_artifact),
+            "evaluate": bool(master_artifact and (evaluation is not None
+                                                   or (complete and complete.get("final_psnr") is not None))),
             "package": (run_dir / "archive/manifest.json").is_file()}
     payload["done"] = done
     payload.setdefault("stage", "train" if progress or complete else "ingest")
@@ -311,10 +537,24 @@ def construction_payload(run_dir, process=None, folder=None):
         payload["timings"] = read_json(run_dir / "timing-summary.json")
         if state:
             for stage, record in state.get("stages", {}).items():
-                done[stage] = record.get("state") == "complete"
+                done[stage] = (_stage_outputs_match(run_dir, stage, record, done.get(stage, False))
+                               if isinstance(record, dict) else False)
             if state.get("state") in ("failed", "cancelled", "complete"):
                 payload["state"] = state["state"]
                 payload["error"] = state.get("error")
-            payload["can_resume"] = state.get("state") in ("failed", "cancelled")
+            # A terminal marker without matching output receipts is an
+            # incomplete/unknown run.  Keep the evidence visible and make the
+            # dashboard eligible to retry rather than reporting a false pass.
+            if state.get("state") == "complete":
+                expected_stages = [name for name in state.get("stages", {})
+                                   if name in _STAGE_OUTPUTS]
+                invalid = [name for name in expected_stages if not done.get(name, False)]
+                if invalid:
+                    payload["state"] = "unknown"
+                    payload["error"] = (
+                        "Pipeline reported completion but required stage marker/output "
+                        "fingerprint is missing or changed: " + ", ".join(invalid)
+                    )
+            payload["can_resume"] = state.get("state") in ("failed", "cancelled") or payload["state"] == "unknown"
         payload["cancel_requested"] = (run_dir / "cancel.request").is_file()
     return payload

@@ -8,8 +8,38 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .construction import Progress, atomic_json, read_json
+from .construction import (
+    DEFAULT_STALE_SECONDS,
+    Progress,
+    atomic_json,
+    process_alive,
+    read_json,
+)
 from .telemetry import measure, timing_summary
+
+PIPELINE_COMPATIBILITY = {
+    "source_identity": "sha256-content-v2",
+    "training_save": "vitrine/training-save/1",
+    "ply_format": "vitrine/gaussian-ply/binary-little-endian-1.0",
+}
+
+
+def current_compatibility():
+    """Return the resume contract plus a digest of code that affects stages."""
+    digest = hashlib.sha256()
+    package_root = Path(__file__).resolve().parent
+    for name in ("pipeline.py", "train.py", "ply.py", "construction.py", "telemetry.py",
+                 "ingest.py", "dataset.py", "colmap_io.py", "undistort.py", "frame_selection.py",
+                 "sfm.py", "profiles.py", "cli.py", "engines.py", "export.py", "package.py"):
+        path = package_root / name
+        digest.update(name.encode("utf-8"))
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError:
+            digest.update(b"<missing>")
+    return {**PIPELINE_COMPATIBILITY, "implementation_sha256": digest.hexdigest()}
 
 
 def check_cancel(run_dir):
@@ -55,10 +85,16 @@ def source_identity(source):
     source = Path(source)
     from .ingest import IMAGE_SUFFIXES, VIDEO_SUFFIXES
     paths = [source] if source.is_file() else sorted(source.rglob("*"))
-    records = [(str(p.relative_to(source)) if source.is_dir() else p.name,
-                p.stat().st_size, p.stat().st_mtime_ns) for p in paths
-               if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES | VIDEO_SUFFIXES]
-    return hashlib.sha256(json.dumps(records).encode()).hexdigest()
+    records = []
+    for path in paths:
+        if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES | VIDEO_SUFFIXES:
+            continue
+        records.append({
+            "name": str(path.relative_to(source)) if source.is_dir() else path.name,
+            "bytes": path.stat().st_size,
+            "sha256": digest_file(path),
+        })
+    return hashlib.sha256(json.dumps(records, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 OUTPUTS = {
@@ -72,6 +108,63 @@ OUTPUTS = {
 }
 
 
+def _recover_running_stages(state, run_dir=None, *, now=None):
+    """Turn a stage left ``running`` by a vanished worker into ``unknown``.
+
+    Stage outputs are deliberately retained for inspection.  The next resume
+    will rerun the unknown stage unless its state is explicitly verified as
+    complete, so a stale JSON record can never make a partial training run look
+    successful.
+    """
+    now = time.time() if now is None else float(now)
+    recovered = []
+    pipeline_status = read_json(Path(run_dir) / "construction-status.json") if run_dir else None
+    for name, record in state.get("stages", {}).items():
+        if not isinstance(record, dict) or record.get("state") != "running":
+            continue
+        live_status = pipeline_status if pipeline_status and pipeline_status.get("stage") == name else None
+        heartbeat = (live_status or {}).get("heartbeat", record.get("heartbeat", record.get("started", 0)))
+        try:
+            age = max(0.0, now - float(heartbeat))
+        except (TypeError, ValueError):
+            age = float("inf")
+        alive = process_alive((live_status or {}).get("pid", record.get("pid")))
+        if alive is not False and age <= DEFAULT_STALE_SECONDS:
+            continue
+        reason = "worker process is no longer alive" if alive is False else (
+            f"no heartbeat for {age:.1f}s (threshold {DEFAULT_STALE_SECONDS:.1f}s)"
+        )
+        record.update(
+            state="unknown",
+            failure_kind="worker_disappeared" if alive is False else "heartbeat_timeout",
+            error=f"Pipeline stage status is unknown: {reason}",
+            recovered_at=now,
+            heartbeat=now,
+        )
+        recovered.append({"stage": name, "reason": reason, "at": now})
+    if recovered:
+        state.setdefault("recovery", []).extend(recovered)
+    return recovered
+
+
+def _invalidate_incompatible_stages(state):
+    """Return a reason when a saved pipeline cannot safely be resumed.
+
+    Compatibility changes are intentionally a hard boundary.  Re-running the
+    first stage into an existing run would move accepted ingest/SfM outputs and
+    make their provenance ambiguous.  The caller records the refusal and asks
+    for a new run directory, leaving every old artifact untouched.
+    """
+    saved = state.get("compatibility")
+    expected = current_compatibility()
+    if saved == expected:
+        return None
+    reason = "pipeline compatibility record is missing" if saved is None else (
+        f"pipeline compatibility changed ({saved!r} -> {expected!r})"
+    )
+    return reason
+
+
 def fingerprint(run_dir, stage):
     root = Path(run_dir)
     files = OUTPUTS[stage]
@@ -83,11 +176,19 @@ def fingerprint(run_dir, stage):
         result[name] = digest_file(path)
     if stage == "ingest":
         images = sorted((root / "ingest/images").rglob("*"))
-        records = [(p.relative_to(root).as_posix(), p.stat().st_size, p.stat().st_mtime_ns)
+        records = [(p.relative_to(root).as_posix(), p.stat().st_size, digest_file(p))
                    for p in images if p.is_file()]
         if not records:
             raise ValueError("Ingest produced no prepared images")
         result["image_inventory"] = hashlib.sha256(json.dumps(records).encode()).hexdigest()
+    if stage == "train":
+        # Existence and size checks are insufficient for a full-SH model: a
+        # truncated binary can still have a nonzero size.  Validate the master
+        # before allowing the stage to be reused on resume.  The result shape
+        # stays compatible with historical pipeline records.
+        from .ply import verify_splat_ply
+
+        verify_splat_ply(root / "model/scene.ply", require_nonempty=True)
     if stage == "export" and (root / "model/scene.splat").stat().st_size % 32:
         raise ValueError("Viewer splat has incomplete records")
     if stage == "package":
@@ -122,7 +223,28 @@ def run_pipeline(args, stages):
             raise ValueError("Existing outputs belong to a historical run; use individual stages or a new run directory.")
         config = {k: v for k, v in vars(args).items() if k not in {"func", "resume", "verbose", "command", "run_dir"}
                   and not k.startswith("_")}
-        state = saved or dict(schema="vitrine/pipeline/1", config=config, stages={}, created=time.time())
+        state = saved or dict(
+            schema="vitrine/pipeline/1",
+            config=config,
+            stages={},
+            created=time.time(),
+            compatibility=current_compatibility(),
+            source_identity_schema="sha256-content-v2",
+        )
+        if saved:
+            _recover_running_stages(state, run_dir)
+            incompatibility = _invalidate_incompatible_stages(state)
+            if incompatibility:
+                state.setdefault("recovery", []).append({
+                    "kind": "compatibility_refused",
+                    "reason": incompatibility,
+                    "at": time.time(),
+                })
+                atomic_json(path, state)
+                raise ValueError(
+                    f"Cannot safely resume this pipeline: {incompatibility}. "
+                    "Choose a new --run-dir; existing outputs were preserved."
+                )
         (run_dir / "cancel.request").unlink(missing_ok=True)
         state.update(state="running", pid=os.getpid(), updated=time.time(), error=None)
         atomic_json(path, state)
@@ -132,9 +254,11 @@ def run_pipeline(args, stages):
             # Session import was already validated and staged by cmd_run.
             source = Path(args.source)
             identity = source_identity(source)
-            if saved and saved.get("source_identity") != identity:
+            if (saved and saved.get("source_identity_schema") == "sha256-content-v2"
+                    and saved.get("source_identity") != identity):
                 raise ValueError("Input media changed since this run began; choose a new run directory")
             state["source_identity"] = identity
+            state["source_identity_schema"] = "sha256-content-v2"
             from .hardware import resolve_runtime
             from .profiles import describe, resolve
             runtime = resolve_runtime()
@@ -164,18 +288,28 @@ def run_pipeline(args, stages):
                     print(f"Keeping completed stage: {name}", flush=True)
                     continue
                 began = time.monotonic()
-                state["stages"][name] = dict(state="running", started=time.time())
+                state["stages"][name] = dict(
+                    state="running", started=time.time(), heartbeat=time.time(), pid=os.getpid()
+                )
                 atomic_json(path, state)
+                stage_exit_code = None
                 try:
                     with Progress(run_dir, name), measure(run_dir, name):
                         code = stage(args)
+                        stage_exit_code = code
                         if code:
                             raise RuntimeError(f"{name} exited with code {code}")
                         outputs = fingerprint(run_dir, name)
-                    state["stages"][name].update(state="complete", seconds=round(time.monotonic()-began, 3), outputs=outputs)
+                    state["stages"][name].update(
+                        state="complete", seconds=round(time.monotonic()-began, 3), outputs=outputs,
+                        exit_code=stage_exit_code, heartbeat=time.time(), finished=time.time(), pid=None,
+                    )
                 except BaseException as exc:
-                    state["stages"][name].update(state="cancelled" if isinstance(exc, KeyboardInterrupt) else "failed",
-                                                seconds=round(time.monotonic()-began, 3), error=str(exc))
+                    state["stages"][name].update(
+                        state="cancelled" if isinstance(exc, KeyboardInterrupt) else "failed",
+                        seconds=round(time.monotonic()-began, 3), error=str(exc),
+                        exit_code=stage_exit_code, heartbeat=time.time(), finished=time.time(), pid=None,
+                    )
                     raise
                 finally:
                     state["updated"] = time.time()
