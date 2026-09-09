@@ -294,7 +294,7 @@ def _software_checks(root: Path, checks: Iterable[Mapping[str, Any]], python_exe
         result.append(_check("Python baseline", "fail", f"{platform.python_version()} is below Python 3.11",
                              fix="Create an isolated environment with Python 3.11; do not change the existing environment in place."))
     result.append(_check("Selected interpreter", "pass" if Path(selected).exists() else "warning",
-                         selected if Path(selected).exists() else f"not found: {selected}",
+                         Path(selected).name if Path(selected).exists() else "selected interpreter not found",
                          fix="Pass --python with the target environment's Python executable.", required=True))
     for check in checks:
         if check["name"] not in GPU_CHECK_NAMES and check["name"] not in QUALITY_CHECK_NAMES:

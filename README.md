@@ -12,6 +12,12 @@
 
 <h1 align="center">Vitrine</h1>
 
+**Recovery candidate:** see [the recovery report](docs/demo-recovery-report.md)
+and [A6000 rehearsal commands](docs/a6000-rehearsal.md). Software checks do not
+establish capture fidelity. Local SAM2 isolation requires its separately
+installed runner/models; object surfaces require exact, checksummed mask and
+camera support. Human visual acceptance remains pending.
+
 **September demo workflow:** use `--quality demo` (now the CLI default),
 `preflight --source <capture-folder>`, then `run --source <capture-folder>`.
 Failed runs retain completed stages: repeat with the same `--run-dir` and
@@ -273,9 +279,9 @@ python -m vitrine --run-dir runs/my-capture evaluate
 python -m vitrine --run-dir runs/my-capture package --title "..." --subject "..."
 ```
 
-`run` does not invoke the separate `evaluate` command. Run evaluation explicitly
-and package again if the archive should include that report. Training metrics
-and saved-PLY evaluation are distinct records.
+`run` includes an independent saved-PLY evaluation stage. Training metrics
+and saved-PLY evaluation are distinct records; a failed optional stage remains
+visible and does not invalidate an already verified master.
 
 Make an early registration check while the subject still exists. It answers the most
 important early question — whether the capture has enough overlap to register —
@@ -397,7 +403,7 @@ python -m vitrine profiles
 ```
 
 This prints the shipped settings and **estimates**, not guaranteed processing
-times. The CLI defaults to `archive` when no quality is supplied.
+times. The CLI defaults to `demo` when no quality is supplied.
 
 The stock workstation source/crop pairs are draft 2048/800, standard 3200/1280
 and archive 4096/1600. Each has a nominal crop-to-long-edge ratio below 0.5;

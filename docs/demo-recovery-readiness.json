@@ -1,0 +1,379 @@
+{
+  "schema": "vitrine/rehearsal-readiness/1",
+  "generated_at": "2026-09-09T23:27:03.772703+00:00",
+  "status": "blocked",
+  "target": {
+    "hardware_target": "medium",
+    "hardware": "NVIDIA RTX A6000",
+    "platform": "Windows",
+    "python_baseline": "3.11",
+    "visual_approval_required": true
+  },
+  "project": {
+    "root": ".",
+    "run_dir": "runs/a6000-rehearsal",
+    "source": null,
+    "report": "docs/demo-recovery-readiness.json"
+  },
+  "machine": {
+    "platform": "Linux-6.18.35-x86_64-with-glibc2.39",
+    "python": "3.12.14",
+    "python_executable": "selected interpreter",
+    "hardware": {
+      "schema": "vitrine/hardware/1",
+      "platform": "Linux",
+      "os_version": "#1 SMP Mon Aug 31 18:10:37 UTC 2026",
+      "architecture": "x86_64",
+      "gpu_available": false,
+      "cuda_available": false,
+      "torch_cuda_available": false,
+      "gpu_vendor": null,
+      "gpu_model": null,
+      "driver_version": null,
+      "cuda_version": null,
+      "compute_capability": null,
+      "vram_total_gb": null,
+      "vram_free_gb": null,
+      "cpu_model": "x86_64",
+      "cpu_logical_cores": 9,
+      "ram_total_gb": 21.522781372070312,
+      "ram_available_gb": 20.772632598876953,
+      "capability_tier": "cpu",
+      "overrides": [],
+      "torch_version": "2.14.0+cpu"
+    }
+  },
+  "software_checks": [
+    {
+      "name": "Python baseline",
+      "status": "warning",
+      "detail": "3.12.14 detected; Python 3.11 is the supported baseline",
+      "required": true,
+      "fix": "Use a target-side Python 3.11 virtual environment for the A6000 rehearsal."
+    },
+    {
+      "name": "Selected interpreter",
+      "status": "pass",
+      "detail": "python",
+      "required": true,
+      "fix": "Pass --python with the target environment's Python executable."
+    },
+    {
+      "name": "torch",
+      "status": "pass",
+      "detail": "2.14.0+cpu",
+      "fix": "",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "gsplat",
+      "status": "fail",
+      "detail": "not installed",
+      "fix": "Install the pinned project requirements into the isolated Python environment.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "numpy",
+      "status": "pass",
+      "detail": "2.5.3",
+      "fix": "",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "scipy",
+      "status": "pass",
+      "detail": "1.18.1",
+      "fix": "",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "PIL",
+      "status": "pass",
+      "detail": "12.3.0",
+      "fix": "",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "plyfile",
+      "status": "pass",
+      "detail": "1.1.5",
+      "fix": "",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "cv2",
+      "status": "pass",
+      "detail": "5.0.0",
+      "fix": "",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "pymeshlab",
+      "status": "warning",
+      "detail": "not installed",
+      "fix": "Install the pinned requirements-mesh.txt in the isolated environment before object meshing.",
+      "optional": true,
+      "required": false
+    },
+    {
+      "name": "Blender",
+      "status": "warning",
+      "detail": "not found",
+      "fix": "Install Blender only if the optional texture/baking handoff is required; object surface acceptance does not depend on it.",
+      "optional": true,
+      "required": false
+    },
+    {
+      "name": "Docker Linux engine",
+      "status": "fail",
+      "detail": "docker not found",
+      "fix": "Start Docker Desktop with the WSL2/Linux container backend, then rerun preflight.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "Output folder",
+      "status": "pass",
+      "detail": "writable",
+      "fix": "",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "ffmpeg",
+      "status": "pass",
+      "detail": "ffmpeg",
+      "fix": "",
+      "optional": true,
+      "required": false
+    },
+    {
+      "name": "ffprobe",
+      "status": "pass",
+      "detail": "ffprobe",
+      "fix": "",
+      "optional": true,
+      "required": false
+    },
+    {
+      "name": "Disk space",
+      "status": "pass",
+      "detail": "27.7 GiB free; preliminary reserve 5.0 GiB",
+      "fix": "",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "Object sidecar executable",
+      "status": "warning",
+      "detail": "not configured; scene reconstruction remains available",
+      "fix": "Configure VITRINE_OBJECT_SIDECAR only when the separately installed object sidecar is ready.",
+      "optional": true,
+      "required": false
+    },
+    {
+      "name": "Object sidecar weights",
+      "status": "not_run",
+      "detail": "not checked because the optional sidecar is not configured",
+      "fix": "Run the sidecar's own local model/weights check before object isolation.",
+      "optional": true,
+      "required": false
+    },
+    {
+      "name": "Optional mesh adapter",
+      "status": "warning",
+      "detail": "not configured; object mesh stage is unavailable",
+      "fix": "Configure VITRINE_MESH_COMMAND_JSON only for a tested local adapter.",
+      "optional": true,
+      "required": false
+    },
+    {
+      "name": "Optional mesh weights",
+      "status": "not_run",
+      "detail": "not checked because no adapter is configured",
+      "fix": "Run the adapter's own local model/weights check before attempting mesh-images.",
+      "optional": true,
+      "required": false
+    }
+  ],
+  "real_gpu_execution": [
+    {
+      "name": "PyTorch CUDA",
+      "status": "fail",
+      "detail": "CUDA unavailable",
+      "fix": "Install the documented CUDA-matched PyTorch environment and NVIDIA driver; run vitrine doctor.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "GPU driver",
+      "status": "fail",
+      "detail": "not reported by nvidia-smi",
+      "fix": "Install/enable the NVIDIA driver on the Lab workstation and confirm nvidia-smi works.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "GPU compute capability",
+      "status": "fail",
+      "detail": "not reported",
+      "fix": "Confirm a CUDA-visible NVIDIA GPU; record its compute capability before warming gsplat.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "gsplat CUDA extension",
+      "status": "fail",
+      "detail": "not probed because PyTorch CUDA or a required package is unavailable",
+      "fix": "Resolve the CUDA and package checks, then rerun the readiness report.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "Target GPU identity",
+      "status": "blocked",
+      "detail": "unknown GPU; compute capability unknown",
+      "required": true,
+      "fix": "Confirm the actual NVIDIA RTX A6000 and record its driver/compute capability before the rehearsal."
+    },
+    {
+      "name": "Hardware target",
+      "status": "blocked",
+      "detail": "requested medium (NVIDIA RTX A6000); observed no GPU",
+      "required": true,
+      "fix": "Run this rehearsal on the requested NVIDIA RTX A6000; a capability override is not a hardware benchmark."
+    }
+  ],
+  "reconstruction_quality": [
+    {
+      "name": "Run directory",
+      "status": "not_run",
+      "detail": "no run at runs/a6000-rehearsal",
+      "required": true,
+      "fix": "Run a real capture into a new run directory, then regenerate this report."
+    },
+    {
+      "name": "Object sidecar contract",
+      "status": "not_run",
+      "detail": "object isolation cannot start before a real scene run exists",
+      "required": true,
+      "fix": "Complete ingest, COLMAP and Gaussian scene training, then run the configured local sidecar."
+    },
+    {
+      "name": "Object mesh structure",
+      "status": "not_run",
+      "detail": "object surface reconstruction has not run",
+      "required": true,
+      "fix": "After validated object separation, publish a supported object GLB and inspect it visually."
+    }
+  ],
+  "offline_operation": [
+    {
+      "name": "Offline rehearsal mode",
+      "status": "not_run",
+      "detail": "offline mode was not requested; no network claim made",
+      "required": false,
+      "fix": "Repeat with --offline after online preparation and model warm-up."
+    }
+  ],
+  "artifact_hashes": {},
+  "human_visual_approval": {
+    "status": "pending",
+    "approved": false,
+    "reviewer": null,
+    "notes": "Human visual/demo approval is deliberately pending.",
+    "artifact_hashes": {}
+  },
+  "blocking_checks": [
+    {
+      "name": "gsplat",
+      "status": "fail",
+      "detail": "not installed",
+      "fix": "Install the pinned project requirements into the isolated Python environment.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "Docker Linux engine",
+      "status": "fail",
+      "detail": "docker not found",
+      "fix": "Start Docker Desktop with the WSL2/Linux container backend, then rerun preflight.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "PyTorch CUDA",
+      "status": "fail",
+      "detail": "CUDA unavailable",
+      "fix": "Install the documented CUDA-matched PyTorch environment and NVIDIA driver; run vitrine doctor.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "GPU driver",
+      "status": "fail",
+      "detail": "not reported by nvidia-smi",
+      "fix": "Install/enable the NVIDIA driver on the Lab workstation and confirm nvidia-smi works.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "GPU compute capability",
+      "status": "fail",
+      "detail": "not reported",
+      "fix": "Confirm a CUDA-visible NVIDIA GPU; record its compute capability before warming gsplat.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "gsplat CUDA extension",
+      "status": "fail",
+      "detail": "not probed because PyTorch CUDA or a required package is unavailable",
+      "fix": "Resolve the CUDA and package checks, then rerun the readiness report.",
+      "optional": false,
+      "required": true
+    },
+    {
+      "name": "Target GPU identity",
+      "status": "blocked",
+      "detail": "unknown GPU; compute capability unknown",
+      "required": true,
+      "fix": "Confirm the actual NVIDIA RTX A6000 and record its driver/compute capability before the rehearsal."
+    },
+    {
+      "name": "Hardware target",
+      "status": "blocked",
+      "detail": "requested medium (NVIDIA RTX A6000); observed no GPU",
+      "required": true,
+      "fix": "Run this rehearsal on the requested NVIDIA RTX A6000; a capability override is not a hardware benchmark."
+    },
+    {
+      "name": "Run directory",
+      "status": "not_run",
+      "detail": "no run at runs/a6000-rehearsal",
+      "required": true,
+      "fix": "Run a real capture into a new run directory, then regenerate this report."
+    },
+    {
+      "name": "Object sidecar contract",
+      "status": "not_run",
+      "detail": "object isolation cannot start before a real scene run exists",
+      "required": true,
+      "fix": "Complete ingest, COLMAP and Gaussian scene training, then run the configured local sidecar."
+    },
+    {
+      "name": "Object mesh structure",
+      "status": "not_run",
+      "detail": "object surface reconstruction has not run",
+      "required": true,
+      "fix": "After validated object separation, publish a supported object GLB and inspect it visually."
+    }
+  ]
+}

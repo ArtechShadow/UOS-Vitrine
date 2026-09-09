@@ -1,5 +1,11 @@
 # Optional local mesh provider
 
+Recovery candidate: [the exact object-support contract](object-support-contract.md)
+now governs observed mesh reconstruction. The historical installed runner and
+model caches described here were not available in the recovery task. Existing
+Gaussian candidates lacking this evidence remain inspectable but cannot pass
+the supported-surface gate.
+
 The Gaussian baseline remains `GsplatEngine`. Heavy mesh models run in a
 separate local process; no TRELLIS, Hunyuan, cloud API or weights are installed
 by the core requirements. A configured command is an adapter, not proof that
