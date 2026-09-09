@@ -222,7 +222,38 @@ Quality measured on {n_eval} held-out views that the optimiser never saw:
 """
 
 
-def build_package(
+def build_package(output_root: Path, **kwargs) -> PackageResult:
+    """Build and verify a fresh generation before publishing it.
+
+    Previous archives remain in a sibling directory. A failed rebuild never
+    destroys the last verified package or source media.
+    """
+    import os
+    import uuid
+    from dataclasses import replace
+    from .telemetry import measure
+    output_root = Path(output_root).resolve()
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    working = output_root.with_name(output_root.name + ".working-" + uuid.uuid4().hex)
+    with measure(output_root.parent, "archive_packaging"):
+        result = _build_package_impl(working, **kwargs)
+        ok, problems = verify_package(working)
+        if not ok:
+            raise ValueError("New archive failed verification: " + "; ".join(problems[:5]))
+        previous = None
+        if output_root.exists():
+            previous = output_root.with_name(output_root.name + ".previous-" + uuid.uuid4().hex)
+            os.replace(output_root, previous)
+        try:
+            os.replace(working, output_root)
+        except OSError:
+            if previous is not None:
+                os.replace(previous, output_root)
+            raise
+    return replace(result, root=output_root)
+
+
+def _build_package_impl(
     output_root: Path,
     *,
     originals: list[Path],
@@ -255,9 +286,7 @@ def build_package(
     if capture_type not in ("scene", "object"):
         raise ValueError("capture_type must be scene or object")
     output_root = Path(output_root)
-    if output_root.exists():
-        shutil.rmtree(output_root)
-    output_root.mkdir(parents=True)
+    output_root.mkdir(parents=True, exist_ok=False)
     from .construction import atomic_json
     progress = dict(phase="Copying files", copied=0, checksummed=0, bytes=0, complete=False)
     def publish():
@@ -325,7 +354,12 @@ def build_package(
 
     if object_meshes_dir is not None:
         from .object_mesh import archive_meshes
-        counts["object_meshes"] = archive_meshes(Path(object_meshes_dir), output_root / "derivatives" / "object-meshes")
+        try:
+            counts["object_meshes"] = archive_meshes(Path(object_meshes_dir), output_root / "derivatives" / "object-meshes")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("Optional object meshes were not archived: %s", exc)
+            (output_root / "mesh-warning.txt").write_text(
+                "Optional mesh generation unavailable; scene reconstruction is preserved.\n" + str(exc), encoding="utf-8")
 
     # Checksum everything now in place.
     files: list[dict[str, Any]] = []

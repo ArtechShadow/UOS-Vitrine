@@ -518,14 +518,18 @@ def _train_impl(
     generator = torch.Generator().manual_seed(seed)
 
     if views is None:
-        views = ViewSet(
-            model, images_dir,
-            long_edge=profile.source_long_edge,
-            device=device,
-        )
+        from .telemetry import measure
+        with measure(output_dir, "preprocessing", input_frames=len(model.images)):
+            views = ViewSet(
+                model, images_dir,
+                long_edge=profile.source_long_edge,
+                device=device,
+            )
     logger.info("view cache: %.2f GB in system RAM", views.memory_footprint_gb())
 
-    params = _initialise(model, profile.sh_degree, device)
+    from .telemetry import measure
+    with measure(output_dir, "gsplat_initialisation", sparse_points=len(model.points_xyz)):
+        params = _initialise(model, profile.sh_degree, device)
     scene_scale = views.scene_scale
 
     optimizers = {
@@ -660,7 +664,12 @@ def _train_impl(
             "source_long_edge.",
             coverage * 100, MIN_SAFE_COVERAGE * 100, int(math.sqrt(MIN_SAFE_COVERAGE * mean_view_pixels)),
         )
-    logger.info("estimated wall clock: ~%.0f min", profile.estimated_minutes())
+    from .hardware import detect_hardware
+    estimate = profile.estimated_minutes(hardware=detect_hardware())
+    if estimate is None:
+        logger.info("Training runtime is not measured for this GPU; progress will report observed time")
+    else:
+        logger.info("reference training time: ~%.1f min (capture dependent)", estimate)
 
     if device.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats()
@@ -675,156 +684,160 @@ def _train_impl(
     observer.preview = TrainingPreview(output_dir, scene_scale, MAX_SCALE_FRACTION)
     observer.preview.capture(params, 0, force=True)
     last_live_status = 0.0
-    for step in range(profile.iterations):
-        sh_degree = _active_sh_degree(step, profile.sh_degree)
+    with measure(output_dir, "gsplat_training", iterations=profile.iterations):
+        for step in range(profile.iterations):
+            if step % 10 == 0:
+                from .pipeline import check_cancel
+                check_cancel(output_dir.parent)
+            sh_degree = _active_sh_degree(step, profile.sh_degree)
 
-        batch = views.crop(views.sample_train_index(generator), profile.crop, generator=generator)
+            batch = views.crop(views.sample_train_index(generator), profile.crop, generator=generator)
 
-        colors = (
-            params["sh0"]
-            if sh_degree == 0
-            else torch.cat([params["sh0"], params["shN"][:, : sh_coefficient_count(sh_degree)]], dim=1)
-        )
-
-        rendered, _, info = rasterization(
-            means=params["means"],
-            quats=F.normalize(params["quats"], dim=-1),
-            scales=torch.exp(params["scales"]),
-            opacities=torch.sigmoid(params["opacities"]),
-            colors=colors,
-            viewmats=batch.world_to_camera,
-            Ks=batch.intrinsics,
-            width=batch.width,
-            height=batch.height,
-            sh_degree=sh_degree,
-            packed=True,
-            rasterize_mode="antialiased",
-            backgrounds=background,
-            absgrad=False,
-        )
-        image = rendered[0]
-
-        strategy.step_pre_backward(params, optimizers, state, step, info)
-
-        if APPEARANCE_OPT:
-            # This view's exposure, applied to the render rather than the
-            # target: the scene keeps one canonical radiance field and the
-            # camera's auto-exposure is modelled as what it is, a per-shot
-            # transform of it.
-            index = batch.view_index
-            image = image * appearance_gain[index] + appearance_bias[index]
-
-        loss, l1_value, ssim_value = photometric_loss(image, batch.image)
-        # MCMC's own regularisers — without these the chain drifts toward many
-        # large, faint Gaussians rather than a compact representation.
-        if opacity_reg and not (OPACITY_REG_UNTIL_REFINE_STOP and step >= refine_stop):
-            loss = loss + opacity_reg * torch.sigmoid(params["opacities"]).abs().mean()
-        if scale_reg:
-            loss = loss + scale_reg * torch.exp(params["scales"]).abs().mean()
-        if APPEARANCE_OPT and APPEARANCE_REG:
-            # Every view is free to rescale its own render, so brightness is a
-            # gauge freedom: without an anchor the whole field can dim while
-            # the gains drift up. Pull toward identity to fix it.
-            loss = loss + APPEARANCE_REG * (
-                (appearance_gain[index] - 1.0).pow(2).mean() + appearance_bias[index].pow(2).mean()
+            colors = (
+                params["sh0"]
+                if sh_degree == 0
+                else torch.cat([params["sh0"], params["shN"][:, : sh_coefficient_count(sh_degree)]], dim=1)
             )
 
-        loss.backward()
+            rendered, _, info = rasterization(
+                means=params["means"],
+                quats=F.normalize(params["quats"], dim=-1),
+                scales=torch.exp(params["scales"]),
+                opacities=torch.sigmoid(params["opacities"]),
+                colors=colors,
+                viewmats=batch.world_to_camera,
+                Ks=batch.intrinsics,
+                width=batch.width,
+                height=batch.height,
+                sh_degree=sh_degree,
+                packed=True,
+                rasterize_mode="antialiased",
+                backgrounds=background,
+                absgrad=False,
+            )
+            image = rendered[0]
 
-        current_means_lr = optimizers["means"].param_groups[0]["lr"]
-        with torch.no_grad():
-            if DENSIFICATION_STRATEGY == "mcmc":
-                strategy.step_post_backward(
-                    params, optimizers, state, step, info, lr=current_means_lr
+            strategy.step_pre_backward(params, optimizers, state, step, info)
+
+            if APPEARANCE_OPT:
+                # This view's exposure, applied to the render rather than the
+                # target: the scene keeps one canonical radiance field and the
+                # camera's auto-exposure is modelled as what it is, a per-shot
+                # transform of it.
+                index = batch.view_index
+                image = image * appearance_gain[index] + appearance_bias[index]
+
+            loss, l1_value, ssim_value = photometric_loss(image, batch.image)
+            # MCMC's own regularisers — without these the chain drifts toward many
+            # large, faint Gaussians rather than a compact representation.
+            if opacity_reg and not (OPACITY_REG_UNTIL_REFINE_STOP and step >= refine_stop):
+                loss = loss + opacity_reg * torch.sigmoid(params["opacities"]).abs().mean()
+            if scale_reg:
+                loss = loss + scale_reg * torch.exp(params["scales"]).abs().mean()
+            if APPEARANCE_OPT and APPEARANCE_REG:
+                # Every view is free to rescale its own render, so brightness is a
+                # gauge freedom: without an anchor the whole field can dim while
+                # the gains drift up. Pull toward identity to fix it.
+                loss = loss + APPEARANCE_REG * (
+                    (appearance_gain[index] - 1.0).pow(2).mean() + appearance_bias[index].pow(2).mean()
                 )
-            else:
-                strategy.step_post_backward(
-                    params, optimizers, state, step, info, packed=True
-                )
-            for optimizer in optimizers.values():
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            if appearance_optimizer is not None:
-                appearance_optimizer.step()
-                appearance_optimizer.zero_grad(set_to_none=True)
 
-            if MAX_ANISOTROPY is not None:
-                # Bound the axis ratio by raising the *thin* axes to a floor
-                # relative to the largest, rather than shrinking the large ones
-                # toward the smallest.
-                #
-                # The direction matters and an earlier version had it the other
-                # way round. Nothing in the objective bounds a Gaussian's
-                # minimum thickness: flattening the axis normal to a surface
-                # costs no photometric error and *earns* a SCALE_REG refund, so
-                # over tens of thousands of Adam steps on log-scales it runs
-                # away. Measured on this project's models, the median *live*
-                # Gaussian has an axis ratio of 2,600 (nested-cinema-01) to
-                # 541,000 (nested-cinema-03-hq); the Luma reference capture's is
-                # 12. Those needles fit the training views and fall apart
-                # between them.
-                #
-                # Anchoring to the smallest axis therefore shrinks a degenerate
-                # splat to nothing — it takes the runaway value as truth and
-                # destroys the footprint the photometric loss actually asked
-                # for. Anchoring to the largest keeps the footprint and gives
-                # the collapsed axis a floor, which is the shape the surface
-                # needed in the first place.
-                log_scales = params["scales"]
-                log_max = log_scales.amax(dim=-1, keepdim=True)
-                log_scales.copy_(
-                    torch.maximum(log_scales, log_max - math.log(MAX_ANISOTROPY))
-                )
-        means_schedule.step()
+            loss.backward()
 
-        if time.monotonic() - last_live_status >= 2:
-            elapsed = time.time() - started
-            observer.update(stage="train", step=step + 1, total=profile.iterations,
-                            n_gaussians=len(params["means"]),
-                            eta_seconds=elapsed * (profile.iterations-step-1) / (step+1))
-            last_live_status = time.monotonic()
-        observer.preview.capture(params, step + 1)
-
-        if step % 500 == 0:
-            now = time.time()
-            power = gpu_power_watts()
-            if power is not None:
-                energy_kwh += power * (now - last_power_sample_time) / 3_600_000
-            last_power_sample_time = now
-
+            current_means_lr = optimizers["means"].param_groups[0]["lr"]
             with torch.no_grad():
-                op_sigmoid = torch.sigmoid(params["opacities"])
-                mean_opacity = float(op_sigmoid.mean())
-                frac_alive = float((op_sigmoid > 0.005).float().mean())
+                if DENSIFICATION_STRATEGY == "mcmc":
+                    strategy.step_post_backward(
+                        params, optimizers, state, step, info, lr=current_means_lr
+                    )
+                else:
+                    strategy.step_post_backward(
+                        params, optimizers, state, step, info, packed=True
+                    )
+                for optimizer in optimizers.values():
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                if appearance_optimizer is not None:
+                    appearance_optimizer.step()
+                    appearance_optimizer.zero_grad(set_to_none=True)
 
-            logger.info(
-                "step %6d/%d  loss %.4f  L1 %.4f  SSIM %.4f  %s GS  sh%d  lr %.2e  "
-                "mean_op %.4f  alive %.1f%%  %s",
-                step, profile.iterations, float(loss.detach()), l1_value, ssim_value,
-                f"{len(params['means']):,}", sh_degree, current_means_lr,
-                mean_opacity, frac_alive * 100,
-                f"{power:.0f} W" if power is not None else "power n/a",
-            )
-            _write_progress(
-                output_dir, profile=profile, step=step, n_gaussians=len(params["means"]),
-                loss=float(loss.detach()), l1_value=l1_value, ssim_value=ssim_value,
-                started=started, history=history, energy_kwh=energy_kwh,
-            )
+                if MAX_ANISOTROPY is not None:
+                    # Bound the axis ratio by raising the *thin* axes to a floor
+                    # relative to the largest, rather than shrinking the large ones
+                    # toward the smallest.
+                    #
+                    # The direction matters and an earlier version had it the other
+                    # way round. Nothing in the objective bounds a Gaussian's
+                    # minimum thickness: flattening the axis normal to a surface
+                    # costs no photometric error and *earns* a SCALE_REG refund, so
+                    # over tens of thousands of Adam steps on log-scales it runs
+                    # away. Measured on this project's models, the median *live*
+                    # Gaussian has an axis ratio of 2,600 (nested-cinema-01) to
+                    # 541,000 (nested-cinema-03-hq); the Luma reference capture's is
+                    # 12. Those needles fit the training views and fall apart
+                    # between them.
+                    #
+                    # Anchoring to the smallest axis therefore shrinks a degenerate
+                    # splat to nothing — it takes the runaway value as truth and
+                    # destroys the footprint the photometric loss actually asked
+                    # for. Anchoring to the largest keeps the footprint and gives
+                    # the collapsed axis a floor, which is the shape the surface
+                    # needed in the first place.
+                    log_scales = params["scales"]
+                    log_max = log_scales.amax(dim=-1, keepdim=True)
+                    log_scales.copy_(
+                        torch.maximum(log_scales, log_max - math.log(MAX_ANISOTROPY))
+                    )
+            means_schedule.step()
 
-        if eval_every and step > 0 and step % eval_every == 0:
-            eval_psnr, eval_ssim = evaluate(params, views, profile.sh_degree, limit=8,
-                construction_dir=output_dir / "construction", construction_step=step)
-            result = EvalResult(step, eval_psnr, eval_ssim, len(params["means"]))
-            history.append(result)
-            logger.info("eval  %s", result.line())
-            _write_progress(
-                output_dir, profile=profile, step=step, n_gaussians=len(params["means"]),
-                loss=float(loss.detach()), l1_value=l1_value, ssim_value=ssim_value,
-                started=started, history=history, energy_kwh=energy_kwh,
-            )
+            if time.monotonic() - last_live_status >= 2:
+                elapsed = time.time() - started
+                observer.update(stage="train", step=step + 1, total=profile.iterations,
+                                n_gaussians=len(params["means"]),
+                                eta_seconds=elapsed * (profile.iterations-step-1) / (step+1))
+                last_live_status = time.monotonic()
+            observer.preview.capture(params, step + 1)
 
-        if save_every and step > 0 and step % save_every == 0:
-            _write(params, output_dir / f"checkpoint_{step}.ply", profile.sh_degree, scene_scale)
+            if step % 500 == 0:
+                now = time.time()
+                power = gpu_power_watts()
+                if power is not None:
+                    energy_kwh += power * (now - last_power_sample_time) / 3_600_000
+                last_power_sample_time = now
+
+                with torch.no_grad():
+                    op_sigmoid = torch.sigmoid(params["opacities"])
+                    mean_opacity = float(op_sigmoid.mean())
+                    frac_alive = float((op_sigmoid > 0.005).float().mean())
+
+                logger.info(
+                    "step %6d/%d  loss %.4f  L1 %.4f  SSIM %.4f  %s GS  sh%d  lr %.2e  "
+                    "mean_op %.4f  alive %.1f%%  %s",
+                    step, profile.iterations, float(loss.detach()), l1_value, ssim_value,
+                    f"{len(params['means']):,}", sh_degree, current_means_lr,
+                    mean_opacity, frac_alive * 100,
+                    f"{power:.0f} W" if power is not None else "power n/a",
+                )
+                _write_progress(
+                    output_dir, profile=profile, step=step, n_gaussians=len(params["means"]),
+                    loss=float(loss.detach()), l1_value=l1_value, ssim_value=ssim_value,
+                    started=started, history=history, energy_kwh=energy_kwh,
+                )
+
+            if eval_every and step > 0 and step % eval_every == 0:
+                eval_psnr, eval_ssim = evaluate(params, views, profile.sh_degree, limit=8,
+                    construction_dir=output_dir / "construction", construction_step=step)
+                result = EvalResult(step, eval_psnr, eval_ssim, len(params["means"]))
+                history.append(result)
+                logger.info("eval  %s", result.line())
+                _write_progress(
+                    output_dir, profile=profile, step=step, n_gaussians=len(params["means"]),
+                    loss=float(loss.detach()), l1_value=l1_value, ssim_value=ssim_value,
+                    started=started, history=history, energy_kwh=energy_kwh,
+                )
+
+            if save_every and step > 0 and step % save_every == 0:
+                _write(params, output_dir / f"checkpoint_{step}.ply", profile.sh_degree, scene_scale)
 
     minutes = (time.time() - started) / 60.0
     observer.preview.capture(params, profile.iterations, force=True)

@@ -77,14 +77,14 @@ internal static class Program
             psi.RedirectStandardOutput = true;
             psi.RedirectStandardError = true;
 
-            if (withObjects && !ConfigureSidecar(root, psi))
-                return 1;
+            if (withObjects)
+                ConfigureSidecar(root, psi);
 
             Console.WriteLine("Vitrine dashboard");
             Console.WriteLine("  project  " + root);
             Console.WriteLine("  python   " + python);
             if (withObjects)
-                Console.WriteLine("  objects  sidecar enabled");
+                Console.WriteLine("  objects  optional sidecar requested");
             Console.WriteLine("Close this window to stop.");
             Console.WriteLine();
 
@@ -179,32 +179,45 @@ internal static class Program
             && File.Exists(Path.Combine(path, "vitrine", "ui", "index.html"));
     }
 
-    static bool ConfigureSidecar(string root, ProcessStartInfo psi)
+    static void ConfigureSidecar(string root, ProcessStartInfo psi)
     {
         string external = Path.Combine(root, "tmp", "external", "vitrine-object-sidecar");
         string sidecarPython = Path.Combine(external, ".venv", "Scripts", "python.exe");
         string runner = Path.Combine(external, "run_sam2_local.py");
         string importer = Path.Combine(root, "scripts", "import_sidecar_splats.py");
+        // The separator is an optional external process. Preserve explicit
+        // environment configuration and let the core scene dashboard start
+        // when this experimental dependency is absent.
+        string configured = Environment.GetEnvironmentVariable("VITRINE_OBJECT_SIDECAR");
+        string configuredArgs = Environment.GetEnvironmentVariable("VITRINE_OBJECT_SIDECAR_ARGS_JSON");
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            Console.WriteLine("  objects  using VITRINE_OBJECT_SIDECAR from the environment");
+            return;
+        }
+
         if (!File.Exists(sidecarPython) || !File.Exists(runner))
         {
-            Fail(
-                "The separate SAM2 sidecar is not installed.\n\n" +
-                "See docs\\sam2-object-sidecar-setup.md\n" +
-                "Expected:\n  " + sidecarPython + "\n  " + runner);
-            return false;
+            Console.WriteLine(
+                "  objects  optional sidecar unavailable; scene workflow remains available.\n" +
+                "           See docs\\sam2-object-sidecar-setup.md when object isolation is needed.");
+            return;
         }
 
         psi.EnvironmentVariables["VITRINE_OBJECT_SIDECAR"] = sidecarPython;
-        psi.EnvironmentVariables["VITRINE_OBJECT_SIDECAR_ARGS_JSON"] = JsonStringArray(new string[]
+        // Preserve runner defaults. A caller can set
+        // VITRINE_OBJECT_SIDECAR_ARGS_JSON for prompts, frame limits, or any
+        // other sidecar-specific setting without this launcher rewriting it.
+        if (string.IsNullOrWhiteSpace(configuredArgs))
         {
-            runner,
-            "--sidecar-root", external,
-            "--core-python", Path.Combine(root, ".venv", "Scripts", "python.exe"),
-            "--core-importer", importer,
-            "--max-frames", "40",
-            "--prompts", "radio"
-        });
-        return true;
+            psi.EnvironmentVariables["VITRINE_OBJECT_SIDECAR_ARGS_JSON"] = JsonStringArray(new string[]
+            {
+                runner,
+                "--sidecar-root", external,
+                "--core-python", Path.Combine(root, ".venv", "Scripts", "python.exe"),
+                "--core-importer", importer
+            });
+        }
     }
 
     static string JsonStringArray(string[] items)

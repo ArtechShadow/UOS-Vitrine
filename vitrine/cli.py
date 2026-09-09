@@ -96,7 +96,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     tier = profiles.detect_tier()
     profile = profiles.resolve(args.quality, tier)
-    print(f"  profile        : {profile.name} (~{profile.estimated_minutes():.0f} min for training)")
+    from .hardware import detect_hardware
+    estimate = profile.estimated_minutes(hardware=detect_hardware())
+    print(f"  profile        : {profile.name} (" + (f"reference {estimate:.1f} min" if estimate is not None else "runtime not measured on this GPU") + ")")
 
     import shutil as _shutil
 
@@ -144,6 +146,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         long_edge=profile.colmap_long_edge,
         stills_budget=args.stills_budget,
         video_budget=args.video_budget,
+        selection_preset=getattr(args, "selection_preset", "balanced"),
         include=args.include,
     )
     print(f"\n{report.accepted} images staged, {report.rejected} rejected")
@@ -170,7 +173,7 @@ def cmd_sfm(args: argparse.Namespace) -> int:
 
 def cmd_train(args: argparse.Namespace) -> int:
     from .colmap_io import read_model
-    from .train import train
+    from .engines import get_engine
 
     run_dir = _run_dir(args)
     profile = profiles.resolve(args.quality, args.tier)
@@ -180,7 +183,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         profile = replace(profile, iterations=args.iterations)
 
     model = read_model(run_dir / "sfm" / "sparse_text")
-    report = train(
+    report = get_engine().train(
         model,
         run_dir / "ingest" / "images",
         run_dir / "model",
@@ -189,6 +192,43 @@ def cmd_train(args: argparse.Namespace) -> int:
     )
     print(f"\nPSNR {report.final_psnr} dB · SSIM {report.final_ssim} · "
           f"{report.n_gaussians:,} Gaussians · {report.minutes} min")
+    return 0
+
+
+def cmd_preflight(args):
+    from .preflight import check_preflight, summary
+    from .construction import atomic_json
+    report = check_preflight(Path(args.source) if args.source else None, Path(args.run_dir),
+                             require_gpu=True, sfm_gpu=args.gpu != "no")
+    atomic_json(Path(args.run_dir) / "preflight.json", report)
+    print(summary(report))
+    return 0 if report["ready"] else 1
+
+
+def cmd_export(args):
+    from .engines import get_engine
+    run_dir = _run_dir(args)
+    engine = get_engine()
+    engine.validate(run_dir / "model/scene.ply")
+    output = engine.export(run_dir / "model/scene.ply", run_dir / "model/scene.splat")
+    print(f"Viewer ready: {output}")
+    return 0
+
+
+def cmd_cleanup(args):
+    from .engines import get_engine
+    run_dir = _run_dir(args)
+    get_engine().cleanup(run_dir / "model/scene.ply", run_dir / "model/scene.cleaned.ply")
+    print("Cleanup candidate saved separately; evaluate it against held-out views before selecting it.")
+    return 0
+
+
+def cmd_mesh_images(args):
+    from .engines import LocalMeshEngine
+    command = json.loads(os.environ.get("VITRINE_MESH_COMMAND_JSON", "[]"))
+    weights = json.loads(os.environ.get("VITRINE_MESH_WEIGHTS_JSON", "[]"))
+    engine = LocalMeshEngine(command, weights)
+    print(engine.reconstruct(Path(args.input), Path(args.output), timeout=args.timeout))
     return 0
 
 
@@ -231,6 +271,7 @@ def cmd_package(args: argparse.Namespace) -> int:
         originals=[Path(p) for p in args.originals],
         sfm_dir=run_dir / "sfm" / "sparse_text",
         model_ply=run_dir / "model" / "scene.ply",
+        derivatives=[run_dir / "model/scene.splat"] if (run_dir / "model/scene.splat").is_file() else None,
         database=run_dir / "sfm" / "database.db",
         title=args.title,
         subject=args.subject,
@@ -238,7 +279,7 @@ def cmd_package(args: argparse.Namespace) -> int:
         train_report=train_report,
         ingest_report=load(run_dir / "ingest" / "ingest.json"),
         sfm_report=load(run_dir / "sfm" / "sfm.json"),
-        profile=profiles.describe(profile),
+        profile=profiles.describe(profile, hardware=load(run_dir / "runtime.json").get("hardware", {})),
         objects_dir=run_dir / "objects",
         object_meshes_dir=run_dir / "object-meshes",
         capture_session_path=session_path if session_path.is_file() else None,
@@ -360,35 +401,49 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """Ingest → SfM → train → package, in one go."""
+    """Run independently recoverable stages with a mandatory preflight."""
+    from .pipeline import restore_args, run_pipeline
+    args = restore_args(args)
+    if args.quality == "demo":
+        # Keep expensive geometry observation opt-in until a full rehearsal
+        # measures its cost. Heartbeats, counters and evaluation images remain.
+        os.environ.setdefault("VITRINE_LIVE_PREVIEWS", "0")
     if getattr(args, "session", None) and list(args.originals) == ["source"]:
         # Default --originals is the repo source/ tree. A session is staged into
         # the run; package that, not whatever happens to sit at ./source.
         args.originals = [str(Path(args.run_dir) / "source")]
+    if getattr(args, "session", None) and not getattr(args, "resume", False):
+        from .capture_session import import_session
+        import_session(Path(args.session), Path(args.run_dir))
+        args.source = str(Path(args.run_dir) / "source")
+        args.session = None
     if getattr(args, "capture_type", None):
         from .construction import atomic_json
         record_path = Path(args.run_dir) / "capture.json"
         record = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else {}
         record["capture_type"] = args.capture_type
         atomic_json(record_path, record)
-    for stage in (cmd_ingest, cmd_sfm, cmd_train, cmd_package):
-        from .construction import Progress
-        name = {cmd_ingest: "ingest", cmd_sfm: "sfm", cmd_train: "train", cmd_package: "package"}[stage]
-        with Progress(Path(args.run_dir), name) as observation:
-            code = stage(args)
-            if code != 0:
-                raise RuntimeError(f"{name} exited with code {code}")
-    return 0
+    stages = [("ingest", cmd_ingest), ("sfm", cmd_sfm), ("train", cmd_train)]
+    if getattr(args, "cleanup", False):
+        stages.append(("cleanup", cmd_cleanup))
+    stages += [("export", cmd_export), ("package", cmd_package)]
+    return run_pipeline(args, stages)
 
 
 def cmd_profiles(args: argparse.Namespace) -> int:
+    from .hardware import detect_hardware
+    hardware = detect_hardware()
     print(f"{'profile':<24}{'source':>8}{'crop':>7}{'cap':>12}{'iters':>8}{'~min':>7}")
     print("-" * 66)
     for tier in profiles.TIERS:
         for quality in profiles.QUALITY_LEVELS:
             p = profiles.resolve(quality, tier)
+            estimate = p.estimated_minutes(hardware=hardware)
+            estimate_text = f"{estimate:.0f}" if estimate is not None else "n/a"
             print(f"{p.name:<24}{p.source_long_edge:>8}{p.crop:>7}{p.cap_max:>12,}"
-                  f"{p.iterations:>8}{p.estimated_minutes():>7.0f}")
+                  f"{p.iterations:>8}{estimate_text:>7}")
+            for warning in p.validation_warnings():
+                print(f"  warning: {warning}")
     print(f"\ndetected tier on this machine: {profiles.detect_tier()}")
     return 0
 
@@ -418,7 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--run-dir", default="runs/default", help="working directory for this capture")
-    parser.add_argument("--quality", default="archive", choices=profiles.QUALITY_LEVELS)
+    parser.add_argument("--quality", default="demo", choices=profiles.QUALITY_LEVELS)
     parser.add_argument("--tier", default=None, choices=profiles.TIERS,
                         help="override GPU tier detection")
 
@@ -426,6 +481,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="check this machine can run the pipeline").set_defaults(func=cmd_doctor)
     sub.add_parser("profiles", help="show the profile table").set_defaults(func=cmd_profiles)
+
+    p_preflight = sub.add_parser("preflight", help="check dependencies and inputs before reconstruction")
+    p_preflight.add_argument("--source", default=None)
+    p_preflight.add_argument("--gpu", default="auto", choices=("auto", "yes", "no"))
+    p_preflight.set_defaults(func=cmd_preflight)
+    sub.add_parser("export", help="prepare the browser splat from the master PLY").set_defaults(func=cmd_export)
+    sub.add_parser("cleanup", help="write a separate optional cleanup candidate").set_defaults(func=cmd_cleanup)
+    p_mesh = sub.add_parser("mesh-images", help="optional local isolated-image provider to GLB")
+    p_mesh.add_argument("--input", required=True, help="isolated-image/mask JSON manifest")
+    p_mesh.add_argument("--output", required=True, help="new output directory")
+    p_mesh.add_argument("--timeout", type=int, default=1800)
+    p_mesh.set_defaults(func=cmd_mesh_images)
 
     p_ui = sub.add_parser("ui", help="local web dashboard for runs and artefacts")
     p_ui.add_argument("--host", default="127.0.0.1")
@@ -449,7 +516,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Vitrine Capture session folder or .zip; staged into <run-dir>/source before ingest",
     )
     p_ingest.add_argument("--stills-budget", type=int, default=400)
-    p_ingest.add_argument("--video-budget", type=int, default=200)
+    p_ingest.add_argument("--video-budget", type=int, default=None, help="explicit legacy per-video frame budget")
+    p_ingest.add_argument("--selection-preset", choices=("fast-demo", "balanced", "archive"), default="balanced")
     p_ingest.add_argument("--include", nargs="*", default=None,
                           help="only these source subfolders (e.g. stills video)")
     p_ingest.set_defaults(func=cmd_ingest)
@@ -502,7 +570,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Vitrine Capture session folder or .zip; staged into <run-dir>/source before ingest",
     )
     p_run.add_argument("--stills-budget", type=int, default=400)
-    p_run.add_argument("--video-budget", type=int, default=200)
+    p_run.add_argument("--video-budget", type=int, default=None, help="explicit legacy per-video frame budget")
+    p_run.add_argument("--selection-preset", choices=("fast-demo", "balanced", "archive"), default="fast-demo")
+    p_run.add_argument("--resume", action="store_true", help="retain verified completed stages using the saved recipe")
+    p_run.add_argument("--cleanup", action="store_true", help="save a separate cleanup candidate; preserve the master")
     p_run.add_argument("--include", nargs="*", default=None)
     p_run.add_argument("--gpu", default="auto", choices=("auto", "yes", "no"))
     p_run.add_argument("--iterations", type=int, default=None)

@@ -718,8 +718,9 @@ function renderCreate() {
           <label>
             <span>Build quality</span>
             <select id="capture-quality" name="quality">
+              <option value="demo" selected>Demo — measured capture recipe</option>
               <option value="draft">Draft — quickest camera and coverage check</option>
-              <option value="standard" selected>Standard — balanced reconstruction</option>
+              <option value="standard">Standard — legacy reconstruction profile</option>
               <option value="archive">Archive — experimental on workstations</option>
             </select>
             <small class="muted">Build time depends on the capture. Archive quality needs validation on this workstation.</small>
@@ -904,7 +905,7 @@ function renderCreate() {
   const draft = state.captureDraft || {};
   $('#capture-title').value = draft.title || '';
   $('#capture-subject').value = draft.subject || '';
-  $('#capture-quality').value = draft.quality || 'standard';
+  $('#capture-quality').value = draft.quality || 'demo';
   form.elements.capture_type.value = draft.capture_type === 'object' ? 'object' : 'scene';
   const updateCaptureKind = () => {
     const object = form.elements.capture_type.value === 'object';

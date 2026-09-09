@@ -33,6 +33,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,10 +79,14 @@ def gpu_available(image: str = DEFAULT_IMAGE) -> bool:
     every GPU container fails to start. Falling back to CPU SIFT is slow but
     correct; failing the run outright is not.
     """
-    probe = subprocess.run(
-        ["docker", "run", "--rm", "--gpus", "all", image, "nvidia-smi", "-L"],
-        capture_output=True, text=True, timeout=120,
-    )
+    try:
+        probe = subprocess.run(
+            ["docker", "run", "--rm", "--pull=never", "--gpus", "all", image, "nvidia-smi", "-L"],
+            capture_output=True, text=True, timeout=45,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("COLMAP GPU probe failed; CPU camera solving would be slower: %s", exc)
+        return False
     if probe.returncode == 0:
         return True
     detail = (probe.stderr or probe.stdout).strip().splitlines()
@@ -172,7 +177,17 @@ def _run(
         if monitor:
             monitor.start()
         try:
-            code = result.wait(timeout=timeout)
+            from .pipeline import check_cancel
+            deadline = time.monotonic() + timeout
+            while result.poll() is None:
+                check_cancel(work.parent)
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    result.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+            code = result.returncode
             reader.join()
             if code:
                 raise ColmapError(f"colmap {args[0]} failed:\n" + "\n".join(tail))
@@ -235,8 +250,10 @@ def _run_sfm(
     ``images_dir`` must contain one subdirectory per camera group, as produced
     by ``ingest``.
     """
-    from functools import partial
-    run_command = partial(_run, progress=observer)
+    from .telemetry import measure
+    def run_command(arguments, **kwargs):
+        with measure(work_dir, "colmap_" + arguments[0], used_gpu=kwargs.get("use_gpu")):
+            return _run(arguments, progress=observer, **kwargs)
     images_dir = Path(images_dir).resolve()
     work_dir = Path(work_dir).resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -257,6 +274,8 @@ def _run_sfm(
 
     if use_gpu is None:
         use_gpu = gpu_available(image)
+    if not use_gpu:
+        logger.warning("COLMAP is using CPU camera solving; expect a substantially longer runtime")
 
     log_path = work_dir / "colmap.log"
     database = work_dir / "database.db"
@@ -267,6 +286,8 @@ def _run_sfm(
     # lines readable and independent of where the run lives on the host.
     mounts = {images_dir: "/images", work_dir: "/work"}
     gpu_flag = "1" if use_gpu else "0"
+    from .hardware import resolve_runtime
+    workers = str(resolve_runtime()["workers"]["sfm"])
 
     run_command(
         [
@@ -278,7 +299,7 @@ def _run_sfm(
             "--ImageReader.camera_model", camera_model,
             "--FeatureExtraction.max_image_size", str(int(max_image_size)),
             "--FeatureExtraction.use_gpu", gpu_flag,
-            "--FeatureExtraction.num_threads", "8",
+            "--FeatureExtraction.num_threads", workers,
         ],
         mounts=mounts, image=image, use_gpu=use_gpu, timeout=7200, log_path=log_path,
     )
@@ -308,7 +329,7 @@ def _run_sfm(
             "--image_path", "/images",
             "--output_path", "/work/sparse",
             "--Mapper.multiple_models", "0",
-            "--Mapper.num_threads", "8",
+            "--Mapper.num_threads", workers,
         ],
         mounts=mounts, image=image, use_gpu=False, timeout=14400, log_path=log_path,
     )

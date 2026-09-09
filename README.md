@@ -12,6 +12,21 @@
 
 <h1 align="center">Vitrine</h1>
 
+**September demo workflow:** use `--quality demo` (now the CLI default),
+`preflight --source <capture-folder>`, then `run --source <capture-folder>`.
+Failed runs retain completed stages: repeat with the same `--run-dir` and
+`run --resume`. The pipeline now explicitly prepares `model/scene.splat` for
+the viewer. The measured demo recipe has a 5090 reference result; A6000 runtime
+still needs a rehearsal. See [the integration report](docs/demo-merge-report-20260909.md),
+[hardware configuration](docs/hardware-config.md), [adaptive ingest](docs/adaptive-ingest.md)
+and [optional local mesh providers](docs/local-mesh-provider.md).
+
+Live geometry snapshots are opt-in for `demo` with `VITRINE_LIVE_PREVIEWS=1`;
+stage progress and evaluation images remain available. `cleanup` creates a
+separate candidate and never replaces the master automatically. iOS remains
+experimental: CLI session import is preserved; dashboard iPhone import is
+marked coming soon and is not required for the September demonstration.
+
 <p align="center">
   <strong>Local scene reconstruction and reproducible 3D digital preservation, with an experimental object-sidecar workflow.</strong>
 </p>

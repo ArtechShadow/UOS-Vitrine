@@ -41,7 +41,9 @@ these numbers ever need re-deriving):
 
 The previous ``relative_throughput=7.0`` for the workstation tier was a
 spec-sheet guess made before any 4090/5090-class card was available to
-measure — it understated this card by roughly 4-5x.
+measure — it understated this card by roughly 4-5x.  The legacy workstation
+estimate remains in the table for reproducibility, but it is tied to that
+benchmark family and is never a promise for another GPU model.
 
 The three 5090 rows above are far flatter than the 3060's (14.4 vs 12.2 ms,
 a 1.2x spread, against the 3060's 500 vs 95 ms, a 5x spread) despite covering
@@ -58,6 +60,7 @@ the conservative side given that flattening.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -81,18 +84,91 @@ class Profile:
     #: Longest edge fed to COLMAP feature extraction and undistortion.
     colmap_long_edge: int
     #: Throughput relative to the RTX 3060 Laptop the benchmarks were run on.
-    #: Only used to scale time estimates; nothing else depends on it.
-    relative_throughput: float = 1.0
+    #: Only used to scale legacy time estimates; nothing else depends on it.
+    #: ``None`` means this profile has no transferable throughput estimate.
+    relative_throughput: float | None = 1.0
+    #: Hardware family for the benchmark behind an estimate.  A caller that
+    #: supplies a hardware snapshot gets no ETA when the model does not match.
+    benchmark_hardware: str | None = None
+    #: A measured wall-clock value, when one exists for this exact recipe.
+    #: This is deliberately separate from ``relative_throughput``: no ratio is
+    #: inferred for a different machine.
+    measured_runtime_minutes: float | None = None
+    #: Source record for an exact measured runtime or a legacy benchmark.
+    estimate_source: str | None = None
 
-    def estimated_minutes(self, visible_fraction: float = 0.39) -> float:
+    @property
+    def nominal_coverage(self) -> float:
+        """The crop/source ratio used for the frame-coverage safety rule."""
+        if self.source_long_edge <= 0:
+            return 0.0
+        return min(1.0, self.crop / self.source_long_edge)
+
+    def validation_warnings(self) -> tuple[str, ...]:
+        """Warnings that can be shown without running a capture.
+
+        The legacy workstation archive values are intentionally preserved for
+        historical comparison.  Its 1600/4096 crop/source ratio is below the
+        50% rule measured for this pipeline, so callers must surface that fact
+        rather than treating the row as a validated recipe.
+        """
+        if self.nominal_coverage < 0.5:
+            warning = (
+                f"nominal frame coverage is {self.nominal_coverage:.0%}, below the 50% "
+                "safe-coverage rule; this profile is unvalidated for general captures"
+            )
+            return (warning,)
+        return ()
+
+    @staticmethod
+    def _hardware_model(hardware: Mapping[str, Any] | str | None) -> str | None:
+        if hardware is None:
+            return None
+        if isinstance(hardware, str):
+            return hardware.strip() or None
+        if not isinstance(hardware, Mapping):
+            return None
+        # Accept both the flat detect_hardware() record and the nested runtime
+        # record so callers do not have to reshape the public API response.
+        model = hardware.get("gpu_model")
+        if model is None and isinstance(hardware.get("hardware"), Mapping):
+            model = hardware["hardware"].get("gpu_model")
+        return str(model).strip() if model else None
+
+    def _matches_benchmark(self, hardware: Mapping[str, Any] | str | None) -> bool:
+        if not self.benchmark_hardware:
+            return True
+        model = self._hardware_model(hardware)
+        if not model:
+            return False
+        expected = self.benchmark_hardware.casefold()
+        actual = model.casefold()
+        # The measured label is deliberately a family token.  This matches
+        # "NVIDIA GeForce RTX 5090" while still rejecting an A6000.
+        return expected in actual or actual in expected
+
+    def estimated_minutes(
+        self,
+        visible_fraction: float = 0.39,
+        *,
+        hardware: Mapping[str, Any] | str | None = None,
+    ) -> float | None:
         """Rough wall-clock estimate from the measured scaling above.
 
         Interpolates the 768x768 laptop measurements linearly in splat count
         and quadratically in crop area, then divides by the tier's throughput.
-        Indicative only: real scenes vary with depth complexity and overlap,
-        and the throughput factor for anything other than the 3060 is a
-        specification-sheet estimate rather than a measurement.
+        This is an historical estimate for the legacy rows.  If a hardware
+        snapshot is supplied, its GPU model must match the benchmark family.
+        The exact ``demo`` recipe returns its one measured value only for the
+        RTX 5090 family; it returns ``None`` for an unknown GPU or another
+        model rather than inventing a transfer estimate.
         """
+        if self.measured_runtime_minutes is not None:
+            return self.measured_runtime_minutes if self._matches_benchmark(hardware) else None
+        if self.relative_throughput is None:
+            return None
+        if hardware is not None and not self._matches_benchmark(hardware):
+            return None
         ms_per_iter = 222.0 * (self.cap_max / 1_500_000) * (self.crop / 768) ** 2
         ms_per_iter *= visible_fraction / 0.39
         ms_per_iter /= max(self.relative_throughput, 1e-6)
@@ -111,6 +187,8 @@ LAPTOP_DRAFT = Profile(
     iterations=7_000,
     sh_degree=2,
     colmap_long_edge=1600,
+    benchmark_hardware="RTX 3060 Laptop",
+    estimate_source="profiles.py legacy 3060 benchmark",
 )
 
 LAPTOP_STANDARD = Profile(
@@ -121,6 +199,8 @@ LAPTOP_STANDARD = Profile(
     iterations=15_000,
     sh_degree=3,
     colmap_long_edge=2000,
+    benchmark_hardware="RTX 3060 Laptop",
+    estimate_source="profiles.py legacy 3060 benchmark",
 )
 
 LAPTOP_ARCHIVE = Profile(
@@ -131,6 +211,8 @@ LAPTOP_ARCHIVE = Profile(
     iterations=30_000,
     sh_degree=3,
     colmap_long_edge=2400,
+    benchmark_hardware="RTX 3060 Laptop",
+    estimate_source="profiles.py legacy 3060 benchmark",
 )
 
 # --- Workstation: RTX 4090 / 5090 class, 24-32 GB ---------------------------
@@ -160,6 +242,8 @@ WORKSTATION_DRAFT = Profile(
     sh_degree=2,
     colmap_long_edge=2000,
     relative_throughput=32.0,
+    benchmark_hardware="RTX 5090",
+    estimate_source="profiles.py synthetic 5090 benchmark rows",
 )
 
 WORKSTATION_STANDARD = Profile(
@@ -171,6 +255,8 @@ WORKSTATION_STANDARD = Profile(
     sh_degree=3,
     colmap_long_edge=3200,
     relative_throughput=32.0,
+    benchmark_hardware="RTX 5090",
+    estimate_source="profiles.py synthetic 5090 benchmark rows",
 )
 
 WORKSTATION_ARCHIVE = Profile(
@@ -182,6 +268,28 @@ WORKSTATION_ARCHIVE = Profile(
     sh_degree=3,
     colmap_long_edge=3840,
     relative_throughput=32.0,
+    benchmark_hardware="RTX 5090",
+    estimate_source="profiles.py synthetic 5090 benchmark rows",
+)
+
+# --- Demo: measured real-capture recipe -----------------------------------
+# This is the exact recipe recorded in docs/demo-video-quality-20260906.md.
+# The 4.3-minute value is a single RTX 5090 video-only training run after the
+# real data's sparse-point guard reduced the effective cap.  It is therefore a
+# measured reference for that GPU family, not a general workstation ETA.
+
+DEMO = Profile(
+    name="demo",
+    source_long_edge=2304,
+    crop=1536,
+    cap_max=2_000_000,
+    iterations=15_000,
+    sh_degree=3,
+    colmap_long_edge=3200,
+    relative_throughput=None,
+    benchmark_hardware="RTX 5090",
+    measured_runtime_minutes=4.3,
+    estimate_source="docs/demo-video-quality-20260906.md",
 )
 
 _TABLE: dict[str, dict[str, Profile]] = {
@@ -189,15 +297,17 @@ _TABLE: dict[str, dict[str, Profile]] = {
         "draft": LAPTOP_DRAFT,
         "standard": LAPTOP_STANDARD,
         "archive": LAPTOP_ARCHIVE,
+        "demo": DEMO,
     },
     "workstation": {
         "draft": WORKSTATION_DRAFT,
         "standard": WORKSTATION_STANDARD,
         "archive": WORKSTATION_ARCHIVE,
+        "demo": DEMO,
     },
 }
 
-QUALITY_LEVELS = ("draft", "standard", "archive")
+QUALITY_LEVELS = ("draft", "standard", "archive", "demo")
 TIERS = ("laptop", "workstation")
 
 
@@ -208,16 +318,29 @@ def detect_tier() -> str:
     completes, whereas an over-provisioned one dies partway through.
     """
     try:
-        import torch
-    except ImportError:
-        logger.warning("torch unavailable — assuming laptop tier")
-        return "laptop"
-    if not torch.cuda.is_available():
-        logger.warning("no CUDA device — assuming laptop tier")
-        return "laptop"
+        from .hardware import detect_hardware
 
-    vram_gb = torch.cuda.get_device_properties(0).total_memory / 2**30
-    return "workstation" if vram_gb >= 20 else "laptop"
+        snapshot = detect_hardware()
+        # Keep this old two-tier API as a compatibility bridge.  The generic
+        # capability_tier in hardware.py is authoritative for new callers.
+        return "workstation" if snapshot.get("capability_tier") == "high" else "laptop"
+    except (ImportError, OSError, RuntimeError):
+        # A broken optional probe should not prevent the profile table from
+        # being inspected.  Preserve the historical torch fallback.
+        try:
+            import torch
+        except ImportError:
+            logger.warning("hardware probe unavailable — assuming laptop tier")
+            return "laptop"
+        try:
+            if not torch.cuda.is_available():
+                logger.warning("no CUDA device — assuming laptop tier")
+                return "laptop"
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / 2**30
+            return "workstation" if vram_gb >= 20 else "laptop"
+        except Exception:  # noqa: BLE001 - optional diagnostic probe
+            logger.warning("CUDA probe failed — assuming laptop tier")
+            return "laptop"
 
 
 def resolve(quality: str = "archive", tier: str | None = None) -> Profile:
@@ -233,8 +356,15 @@ def resolve(quality: str = "archive", tier: str | None = None) -> Profile:
     return _TABLE[tier][quality]
 
 
-def describe(profile: Profile) -> dict[str, Any]:
+def describe(
+    profile: Profile,
+    *,
+    hardware: Mapping[str, Any] | str | None = None,
+) -> dict[str, Any]:
     """Profile as a plain dict plus its time estimate, for manifests and logs."""
     out = asdict(profile)
-    out["estimated_minutes"] = round(profile.estimated_minutes(), 1)
+    estimate = profile.estimated_minutes(hardware=hardware)
+    out["estimated_minutes"] = round(estimate, 1) if estimate is not None else None
+    out["nominal_coverage"] = round(profile.nominal_coverage, 4)
+    out["warnings"] = list(profile.validation_warnings())
     return out

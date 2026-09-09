@@ -78,7 +78,8 @@ class Progress:
     def __exit__(self, typ, exc, tb):
         self.stop.set()
         self.thread.join()
-        self.update(state="failed" if exc else "complete", error=str(exc) if exc else None)
+        self.update(state="cancelled" if isinstance(exc, KeyboardInterrupt) else "failed" if exc else "complete",
+                    error=str(exc) if exc else None, seconds=time.time()-self.data["started"])
 
 
 class SnapshotStore:
@@ -288,4 +289,17 @@ def construction_payload(run_dir, process=None, folder=None):
     payload["source_url"] = "/files/" + quote(run_dir.name, safe="") + "/" + quote(source.relative_to(run_dir).as_posix(), safe="/") if source.is_file() else None
     payload["historical"] = not snapshots and bool(complete) and payload["state"] != "running"
     payload["final_url"] = ("/viewer/" + quote(run_dir.name, safe="")) if folder is None and (training / "scene.splat").is_file() else None
+    if folder is None:
+        state = read_json(run_dir / "pipeline.json")
+        payload["pipeline"] = state
+        payload["preflight"] = read_json(run_dir / "preflight.json")
+        payload["timings"] = read_json(run_dir / "timing-summary.json")
+        if state:
+            for stage, record in state.get("stages", {}).items():
+                done[stage] = record.get("state") == "complete"
+            if state.get("state") in ("failed", "cancelled", "complete"):
+                payload["state"] = state["state"]
+                payload["error"] = state.get("error")
+            payload["can_resume"] = state.get("state") in ("failed", "cancelled")
+        payload["cancel_requested"] = (run_dir / "cancel.request").is_file()
     return payload

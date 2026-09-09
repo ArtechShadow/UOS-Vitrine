@@ -163,7 +163,7 @@ def load_validated_objects(objects_dir: Path) -> list[dict[str, Any]]:
         if literal.is_symlink() or not resolved.is_file():
             raise ObjectManifestError(f"objects[{i}].{path_field} is not a regular file: {mesh_path!r}")
         if mesh_path in seen_paths:
-            raise ObjectManifestError(f"duplicate asset path {mesh_path!r}")
+            raise ObjectManifestError(f"duplicate {path_field}: asset path {mesh_path!r}")
         seen_paths.add(mesh_path)
 
         declared = rec["sha256"]

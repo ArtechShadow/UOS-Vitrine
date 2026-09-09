@@ -21,8 +21,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import tempfile
+import uuid
 import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -410,13 +412,43 @@ def stage_session(session: CaptureSession, dest_source: Path) -> Path:
     stills as source. Writes ``capture-session.json`` next to ``dest_source``.
     """
     dest_source = Path(dest_source)
-    dest_source.mkdir(parents=True, exist_ok=True)
-    for folder in ("stills", "video"):
-        src = session.root / folder
-        if src.is_dir():
-            shutil.copytree(src, dest_source / folder, dirs_exist_ok=True, copy_function=shutil.copy2)
-    staged = dest_source.parent / STAGED_FILENAME
-    staged.write_text(json.dumps(session.document, indent=2) + "\n", encoding="utf-8")
+    parent = dest_source.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    if dest_source.is_symlink() or (dest_source.exists() and not dest_source.is_dir()):
+        raise CaptureSessionError(f"session destination is not a directory: {dest_source}")
+    # A second import into a run must never silently merge camera groups or
+    # stale video with a new phone session. An empty directory is allowed
+    # because the dashboard creates it before validation; anything inside it
+    # is an explicit recovery decision for the operator.
+    if dest_source.exists() and any(dest_source.iterdir()):
+        raise CaptureSessionError(
+            f"session destination is not empty: {dest_source} — "
+            "refusing to mix captures; choose a new run or clear this run explicitly"
+        )
+    staged = parent / STAGED_FILENAME
+    if staged.exists():
+        raise CaptureSessionError(
+            f"{staged} already exists — refusing to replace an existing capture session"
+        )
+
+    staging = Path(tempfile.mkdtemp(prefix=f".{dest_source.name}.session-", dir=parent))
+    manifest_tmp = parent / f".{STAGED_FILENAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        for folder in ("stills", "video"):
+            src = session.root / folder
+            if src.is_dir():
+                shutil.copytree(src, staging / folder, copy_function=shutil.copy2)
+        manifest_tmp.write_text(json.dumps(session.document, indent=2) + "\n", encoding="utf-8")
+        if dest_source.exists():
+            # It was checked above and is intentionally empty. If another
+            # worker populated it meanwhile, rmdir fails without deleting data.
+            dest_source.rmdir()
+        os.replace(staging, dest_source)
+        os.replace(manifest_tmp, staged)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        manifest_tmp.unlink(missing_ok=True)
+        raise
     logger.info(
         "staged session %s → %s (%d stills, %d video)",
         session.session_id,

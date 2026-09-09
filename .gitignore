@@ -19,6 +19,12 @@ reference/
 # Scratch / build artifacts — regenerable, not part of the record.
 tmp/
 output/
+config/local*.json
+config/user*.json
+models/
+weights/
+*.safetensors
+*.ckpt
 .playwright-cli/
 
 # Windows dashboard launcher build products (source is scripts/vitrine_launcher.cs)

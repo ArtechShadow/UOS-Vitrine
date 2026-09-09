@@ -39,6 +39,11 @@ def archive_meshes(source: Path, destination: Path):
         if not re.fullmatch(r'object-[0-9]{4,}\.ply', str(rec['file'])) or (folder / rec['file']).is_symlink() or file.suffix != '.ply' or file.is_symlink() or sha256_file(file) != rec['sha256']:
             raise ValueError('Mesh derivative checksum mismatch')
         files.append(file)
+        if rec.get('glb_file'):
+            glb = resolve_contained(rec['glb_file'], 'glb_file', folder.resolve())
+            if not re.fullmatch(r'object-[0-9]{4,}\.glb', str(rec['glb_file'])) or sha256_file(glb) != rec.get('glb_sha256'):
+                raise ValueError('GLB derivative checksum mismatch')
+            files.append(glb)
     # Refuse links anywhere in the publication path, including ancestors.
     if any(p.is_symlink() for p in (source, source / 'published', folder)):
         raise ValueError('Refusing symlinked mesh generation')
@@ -72,6 +77,10 @@ def mesh_summary(run_dir, process=None):
             if path.is_file() and path.resolve().is_relative_to(Path(run_dir).resolve()):
                 items.append(dict(rec, stale=hashes.get(rec.get('object_id')) != rec.get('source_sha256'),
                                   url=f'/files/{quote(Path(run_dir).name)}/{rel}'))
+                if rec.get('glb_file') and re.fullmatch(r'object-[0-9]{4,}\.glb', str(rec['glb_file'])):
+                    glb = root / 'published' / generation / rec['glb_file']
+                    if glb.is_file() and not glb.is_symlink():
+                        items[-1]['glb_url'] = f"/files/{quote(Path(run_dir).name)}/object-meshes/published/{generation}/{rec['glb_file']}"
     return dict(status=status, objects=items)
 
 
@@ -160,9 +169,12 @@ def build_object_meshes(run_dir: Path):
                     for face in faces:
                         if len(face) != 3 or np.any(face < 0) or np.any(face >= len(vertices)):
                             raise ValueError('Mesher produced invalid triangle indices')
+                    from .mesh_glb import write_mesh_glb
+                    glb = write_mesh_glb(mesh, mesh.with_suffix('.glb'))
                     results.append(dict(object_id=rec['object_id'], label=rec['label'],
                                         source_sha256=rec['sha256'], file=mesh.name,
-                                        sha256=sha256_file(mesh), vertices=len(vertices), faces=len(faces)))
+                                        sha256=sha256_file(mesh), vertices=len(vertices), faces=len(faces),
+                                        glb_file=glb.name, glb_sha256=sha256_file(glb)))
                 manifest = dict(schema='vitrine/object-mesh/1', generation=generation,
                                 method='expected-depth-screened-poisson', experimental=True,
                                 parameters=dict(max_views=120, long_edge=1200, poisson_depth=10, trim_fraction=0),

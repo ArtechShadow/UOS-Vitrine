@@ -6,7 +6,7 @@ import {paintEvidence} from './construction-progress.js';
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 if (params.has('embedded')) document.body.classList.add('construction-embedded');
-const stages = [['ingest','Prepare images'],['sfm','Find camera positions'],['train','Build splat'],['evaluate','Evaluate'],['package','Package'],['viewer','Viewer']];
+const stages = [['preflight','Check readiness'],['ingest','Prepare images'],['sfm','Find camera positions'],['train','Build splat'],['export','Prepare viewer'],['package','Package'],['viewer','Viewer']];
 document.querySelector('.build-stages').innerHTML = stages.map(([id,title],i)=>`<li data-stage="${id}"><button type="button"><b>0${i+1}</b>${title}</button></li>`).join('');
 let inspectedStage = null;
 document.querySelectorAll('.build-stages [data-stage]').forEach(item => item.querySelector('button').onclick = () => {
@@ -210,6 +210,12 @@ function showComparison(value) {
   $('render-caption').textContent=`Recorded render · step ${number(image.step)} · ${image.camera}`;
 }
 function paint() {
+  const controls = document.getElementById('pipeline-controls');
+  if (controls && data) {
+    document.getElementById('cancel-pipeline').hidden = data.state !== 'running' || !data.pipeline;
+    document.getElementById('resume-pipeline').hidden = !data.pipeline || !['failed','cancelled','unknown'].includes(data.state);
+    document.getElementById('cancel-pipeline').disabled = !!data.cancel_requested;
+  }
   if (!data) return;
   const displayedStage = inspectedStage || data.stage;
   paintEvidence(data, displayedStage);
@@ -230,11 +236,12 @@ function paint() {
   $('state-label').textContent=({running:'Processing locally',complete:'Processing finished',failed:'Needs attention',unknown:'Status unknown · connection may be lost'})[data.state] || 'Local workspace';
   const descriptions={ingest:'Preparing photographs and video frames for reconstruction.',sfm:'Finding overlapping views and recovering camera positions.',train:'Refining the splat from the registered photographs.',evaluate:'Measuring how the reconstruction matches photographed views.',package:'Collecting the model and preservation records.'};
   const substeps = {feature_extractor:'Detecting distinctive image details for camera matching.',sequential_matcher:'Matching overlapping video frames.',exhaustive_matcher:'Comparing image pairs to find shared details.',mapper:'Recovering camera positions and triangulating the room. Camera markers and points appear as COLMAP publishes them.',model_converter:'Saving calibrated cameras and points in the archive format.'};
-  $('stage-copy').textContent=data.state==='failed' ? (data.error || 'Processing stopped. Inspect the log before retrying.') : data.historical?'This capture predates recorded construction previews. Its completed model is available below.':substeps[data.substage] || descriptions[data.stage];
+  $('stage-copy').textContent=['failed','cancelled'].includes(data.state) ? (data.error || 'Processing stopped. Completed stages are retained; resume when ready.') : data.historical?'This capture predates recorded construction previews. Its completed model is available below.':substeps[data.substage] || descriptions[data.stage] || ({preflight:'Checking inputs and this computer before reconstruction.',export:'Preparing the interactive viewing file.',cleanup:'Saving a separate cleanup candidate.'})[data.stage];
   $('build-progress').hidden=data.state!=='running';
   const count=data.stage==='train'?data.step:data.count;
   if(Number.isFinite(data.total)&&Number.isFinite(count)&&data.total>0){$('build-progress').max=data.total;$('build-progress').value=count;}else $('build-progress').removeAttribute('value');
   const counts=[];
+  if(data.pipeline?.created) counts.push(['Elapsed',number(Math.max(0,((data.pipeline.pid?Date.now()/1000:data.pipeline.updated)-data.pipeline.created)/60))+' min']);
   if(Number.isFinite(count)) counts.push([data.stage==='train'?'Training step':data.unit||'Processed',number(count)+(data.total?' / '+number(data.total):'')]);
   if(Number.isFinite(data.registered))counts.push(['Registered views',number(data.registered)]);
   if(Number.isFinite(data.points))counts.push(['Sparse points',number(data.points)]);
@@ -264,6 +271,22 @@ function paint() {
 }
 function stopReplay(){clearInterval(playback);playback=null;$('replay').textContent='Replay';}
 $('follow').onclick=()=>{stopReplay();following=true;inspectedStage=null;paint();};
+const pipelineControls = document.createElement('div');
+pipelineControls.id = 'pipeline-controls'; pipelineControls.className = 'build-toolbar';
+for (const [action,label] of [['cancel','Cancel build'],['resume','Resume build'],['open-folder','Open output folder']]) {
+  const button = document.createElement('button'); button.textContent=label; button.id=action+'-pipeline';
+  button.hidden=action!=='open-folder';
+  button.onclick=async()=>{
+    button.disabled=true;
+    try {
+      const response=await fetch(`/api/runs/${encodeURIComponent(run)}/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+      const result=await response.json(); if(!response.ok) throw new Error(result.error);
+      $('notice').textContent=result.message || (action==='resume'?'Resuming verified stages…':'');
+    } catch(error) {$('notice').textContent=error.message;} finally {button.disabled=false;}
+  };
+  pipelineControls.append(button);
+}
+document.querySelector('.build-info').append(pipelineControls);
 $('timeline').oninput=()=>{stopReplay();following=false;selectedId=shownSnapshots()[Number($('timeline').value)]?.id;paint();};
 $('replay').onclick=()=>{
   if(playback){stopReplay();paint();return;}

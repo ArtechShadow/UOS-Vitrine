@@ -12,7 +12,6 @@ Start with::
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import mimetypes
@@ -22,6 +21,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -44,10 +44,28 @@ class _FormField:
 
     __slots__ = ("filename", "file", "value")
 
-    def __init__(self, *, filename: str | None, payload: bytes) -> None:
+    def __init__(
+        self,
+        *,
+        filename: str | None,
+        payload: bytes | None = None,
+        file_obj: Any | None = None,
+        value: str | None = None,
+    ) -> None:
         self.filename = filename
-        self.value = None if filename is not None else payload.decode("utf-8", errors="replace")
-        self.file = io.BytesIO(payload) if filename is not None else None
+        if filename is not None:
+            self.value = None
+            self.file = file_obj or tempfile.SpooledTemporaryFile(
+                max_size=_MULTIPART_SPOOL_BYTES, mode="w+b"
+            )
+            if payload:
+                self.file.write(payload)
+                self.file.seek(0)
+        else:
+            self.value = value if value is not None else (payload or b"").decode(
+                "utf-8", errors="replace"
+            )
+            self.file = None
 
 
 class _MultipartForm:
@@ -72,6 +90,13 @@ class _MultipartForm:
             return field.filename
         return field.value if field.value is not None else default
 
+    def close(self) -> None:
+        """Close temporary upload files owned by this request."""
+        for items in self._fields.values():
+            for field in items:
+                if field.file is not None:
+                    field.file.close()
+
 
 def _disposition_params(header: str) -> dict[str, str]:
     params: dict[str, str] = {}
@@ -83,8 +108,163 @@ def _disposition_params(header: str) -> dict[str, str]:
     return params
 
 
+_MULTIPART_CHUNK = 1024 * 1024
+_MULTIPART_SPOOL_BYTES = 1024 * 1024
+_MULTIPART_TEXT_BYTES = 1024 * 1024
+_MULTIPART_HEADER_BYTES = 64 * 1024
+_MULTIPART_PARTS = 2048
+# A capture can contain a long 4K/60 video, but an unbounded request would let
+# a typo or a broken browser consume the whole workstation disk. The parser
+# streams each file to a SpooledTemporaryFile and rejects the request before
+# reading it when its declared size is unreasonable.
+MAX_MULTIPART_BYTES = 8 * 1024**3
+
+
+class _MultipartTooLarge(ValueError):
+    """A request exceeded the dashboard's bounded upload budget."""
+
+
+class _LimitedBody:
+    """Read at most one HTTP request body while retaining parser pushback."""
+
+    def __init__(self, fp: Any, length: int) -> None:
+        self.fp = fp
+        self.remaining = length
+        self._buffer = bytearray()
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            size = self.remaining
+        size = min(size, self.remaining)
+        if size <= 0:
+            return b""
+        parts: list[bytes] = []
+        if self._buffer:
+            take = min(size, len(self._buffer))
+            parts.append(bytes(self._buffer[:take]))
+            del self._buffer[:take]
+            size -= take
+        if size:
+            # ``BufferedReader.read(n)`` may wait for all *n* bytes when the
+            # request is still open. ``read1`` returns the bytes already
+            # buffered by the HTTP server, which keeps small multipart
+            # requests from deadlocking while the parser waits for a 1 MiB
+            # chunk that can never arrive.
+            read1 = getattr(self.fp, "read1", None)
+            chunk = read1(size) if callable(read1) else self.fp.read(size)
+            if chunk:
+                parts.append(chunk)
+        data = b"".join(parts)
+        # ``remaining`` tracks unread request bytes, including parser
+        # pushback. Consume both buffered and newly-read bytes here.
+        self.remaining -= len(data)
+        return data
+
+    def unread(self, data: bytes) -> None:
+        if data:
+            self._buffer[:0] = data
+            self.remaining += len(data)
+
+
+def _read_multipart_line(reader: _LimitedBody, limit: int = _MULTIPART_HEADER_BYTES) -> bytes:
+    """Read one header/delimiter line without allowing a huge line in RAM."""
+    line = bytearray()
+    while len(line) <= limit:
+        chunk = reader.read(min(8192, limit + 1 - len(line)))
+        if not chunk:
+            return bytes(line)
+        newline = chunk.find(b"\n")
+        if newline >= 0:
+            line.extend(chunk[: newline + 1])
+            reader.unread(chunk[newline + 1 :])
+            return bytes(line)
+        line.extend(chunk)
+    raise ValueError("multipart header line is too long")
+
+
+class _MultipartPart:
+    """Spool one file part to disk, while keeping small text fields bounded."""
+
+    def __init__(self, filename: str | None) -> None:
+        self.filename = filename
+        self.file = (
+            tempfile.SpooledTemporaryFile(max_size=_MULTIPART_SPOOL_BYTES, mode="w+b")
+            if filename is not None
+            else None
+        )
+        self.text = bytearray()
+
+    def write(self, data: bytes) -> None:
+        if not data:
+            return
+        if self.file is not None:
+            self.file.write(data)
+            return
+        if len(self.text) + len(data) > _MULTIPART_TEXT_BYTES:
+            raise ValueError("multipart text field is too large")
+        self.text.extend(data)
+
+    def finish(self) -> _FormField:
+        if self.file is not None:
+            self.file.seek(0)
+            file_obj = self.file
+            self.file = None
+            return _FormField(filename=self.filename, file_obj=file_obj)
+        return _FormField(filename=None, value=bytes(self.text).decode("utf-8", errors="replace"))
+
+    def close(self) -> None:
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+
+
+def _copy_multipart_part(reader: _LimitedBody, boundary: bytes, sink: _MultipartPart) -> bool:
+    """Copy through the next multipart delimiter and return whether it is final."""
+    marker = b"\r\n--" + boundary
+    keep = len(marker) + 2
+    pending = bytearray()
+    while True:
+        chunk = reader.read(_MULTIPART_CHUNK)
+        if chunk:
+            pending.extend(chunk)
+        while True:
+            index = pending.find(marker)
+            if index < 0:
+                # Keep enough bytes to match a delimiter split across reads.
+                if len(pending) > keep:
+                    sink.write(bytes(pending[:-keep]))
+                    del pending[:-keep]
+                break
+            suffix_start = index + len(marker)
+            if len(pending) < suffix_start + 2:
+                if index:
+                    sink.write(bytes(pending[:index]))
+                    del pending[:index]
+                break
+            suffix = bytes(pending[suffix_start : suffix_start + 2])
+            if suffix not in (b"--", b"\r\n"):
+                # This only looks like a boundary in the payload; keep scanning.
+                sink.write(bytes(pending[: index + 1]))
+                del pending[: index + 1]
+                continue
+            sink.write(bytes(pending[:index]))
+            remainder = bytes(pending[suffix_start + 2 :])
+            pending.clear()
+            if suffix == b"\r\n":
+                # The next part's header begins immediately after the delimiter.
+                reader.unread(remainder)
+                return False
+            # A closing delimiter may have a trailing CRLF. Discard only bytes
+            # still belonging to this request and drain the underlying reader.
+            while reader.read(_MULTIPART_CHUNK):
+                pass
+            return True
+        if not chunk:
+            raise ValueError("multipart boundary missing or truncated")
+
+
 def _parse_multipart_form(fp: Any, headers: Any) -> _MultipartForm:
-    """Parse ``multipart/form-data`` without the removed stdlib ``cgi`` module."""
+    """Parse multipart uploads as a bounded stream without the removed ``cgi``."""
     content_type = headers.get("Content-Type", "")
     match = re.search(r"boundary\s*=\s*(\"[^\"]+\"|[^\s;]+)", content_type, re.I)
     if not match:
@@ -94,38 +274,66 @@ def _parse_multipart_form(fp: Any, headers: Any) -> _MultipartForm:
         length = int(headers.get("Content-Length", "0") or 0)
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid content length") from exc
-    if length < 0:
+    if length <= 0:
         raise ValueError("invalid content length")
-    body = fp.read(length)
+    if length > MAX_MULTIPART_BYTES:
+        raise _MultipartTooLarge(
+            f"upload is too large ({length / 2**30:.2f} GiB; maximum is "
+            f"{MAX_MULTIPART_BYTES / 2**30:.0f} GiB)"
+        )
+
+    reader = _LimitedBody(fp, length)
     fields: dict[str, list[_FormField]] = {}
-    for raw in body.split(b"--" + boundary):
-        if raw.startswith(b"--"):
-            continue
-        chunk = raw[2:] if raw.startswith(b"\r\n") else raw[1:] if raw.startswith(b"\n") else raw
-        if not chunk:
-            continue
-        if chunk.endswith(b"\r\n"):
-            chunk = chunk[:-2]
-        elif chunk.endswith(b"\n"):
-            chunk = chunk[:-1]
-        header_blob, sep, payload = chunk.partition(b"\r\n\r\n")
-        if not sep:
-            header_blob, sep, payload = chunk.partition(b"\n\n")
-        if not sep:
-            continue
-        header_text = header_blob.decode("utf-8", errors="replace")
-        disposition = ""
-        for line in header_text.splitlines():
-            if line.lower().startswith("content-disposition:"):
-                disposition = line.split(":", 1)[1].strip()
-                break
-        params = _disposition_params(disposition)
-        name = params.get("name")
-        if not name:
-            continue
-        filename = params.get("filename")
-        fields.setdefault(name, []).append(_FormField(filename=filename, payload=payload))
-    return _MultipartForm(fields)
+    owned: list[_MultipartPart] = []
+    try:
+        first = _read_multipart_line(reader).rstrip(b"\r\n")
+        opening = b"--" + boundary
+        if first != opening:
+            raise ValueError("multipart opening boundary missing")
+        while True:
+            header_lines: list[bytes] = []
+            header_bytes = 0
+            while True:
+                line = _read_multipart_line(reader)
+                if not line:
+                    raise ValueError("multipart headers truncated")
+                header_bytes += len(line)
+                if header_bytes > _MULTIPART_HEADER_BYTES:
+                    raise ValueError("multipart headers are too large")
+                stripped = line.rstrip(b"\r\n")
+                if not stripped:
+                    break
+                header_lines.append(stripped)
+
+            disposition = ""
+            for line in header_lines:
+                if line.lower().startswith(b"content-disposition:"):
+                    disposition = line.split(b":", 1)[1].decode("utf-8", errors="replace").strip()
+                    break
+            params = _disposition_params(disposition)
+            name = params.get("name")
+            filename = params.get("filename") or None
+            sink = _MultipartPart(filename)
+            owned.append(sink)
+            final = _copy_multipart_part(reader, boundary, sink)
+            field = sink.finish()
+            owned.remove(sink)
+            if name:
+                fields.setdefault(name, []).append(field)
+            else:
+                field.file.close() if field.file is not None else None
+            if sum(len(items) for items in fields.values()) > _MULTIPART_PARTS:
+                raise ValueError("multipart form has too many parts")
+            if final:
+                return _MultipartForm(fields)
+    except Exception:
+        for sink in owned:
+            sink.close()
+        for items in fields.values():
+            for field in items:
+                if field.file is not None:
+                    field.file.close()
+        raise
 
 
 # UI assets live next to this module.
@@ -142,12 +350,22 @@ UPLOAD_SUFFIXES = {
     ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp",
     ".heic", ".heif", ".mp4", ".mov", ".m4v", ".avi", ".mkv",
 }
+_WINDOWS_DEVICE_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 def _run_slug(value: str) -> str:
     """Return a filesystem-safe run name derived from a human title."""
     slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
-    return slug[:64] or "new-capture"
+    slug = slug[:64] or "new-capture"
+    # Windows reserves these names even when a suffix is supplied. Keep the
+    # generated folder valid on the demo host and other local workstations.
+    if slug.upper().split(".", 1)[0] in _WINDOWS_DEVICE_NAMES:
+        slug = f"{slug}-run"
+    return slug
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -158,6 +376,109 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _pipeline_record(run_dir: Path) -> dict[str, Any] | None:
+    """Read the persisted pipeline state without inferring completion from files."""
+    record = _read_json(Path(run_dir) / "pipeline.json")
+    return record if isinstance(record, dict) else None
+
+
+def _pipeline_state(run_dir: Path) -> str | None:
+    record = _pipeline_record(run_dir)
+    state = record.get("state") if record else None
+    return state if isinstance(state, str) else None
+
+
+def _pid_is_running(pid: Any) -> bool:
+    """Best-effort local process check used only to avoid duplicate resumes."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+def _preflight_payload(
+    *, source: Path | None, output: Path, full: bool = False
+) -> dict[str, Any]:
+    """Run the cheap dashboard preflight, or the explicit full one."""
+    try:
+        from .preflight import check_preflight
+
+        report = check_preflight(
+            source,
+            output,
+            require_gpu=True,
+            check_sfm=full,
+            # A browser poll must never trigger the first gsplat JIT compile.
+            check_training=full,
+            check_media=source is not None,
+        )
+        report["scope"] = "full" if full else "quick"
+        return report
+    except Exception as exc:  # noqa: BLE001 - surface a truthful UI error
+        logger.exception("preflight failed")
+        return {
+            "ready": False,
+            "scope": "full" if full else "quick",
+            "checks": [{
+                "name": "Preflight service",
+                "status": "error",
+                "detail": str(exc),
+                "fix": "Run vitrine preflight from the project environment and review its output.",
+            }],
+            "hardware": {},
+        }
+
+
+def _capture_command(run_dir: Path, *, resume: bool) -> list[str]:
+    """Rebuild a dashboard job command from its persisted capture ticket."""
+    run_dir = Path(run_dir).resolve()
+    ticket = _read_json(run_dir / "capture.json") or {}
+    pipeline = _pipeline_record(run_dir) or {}
+    config = pipeline.get("config") if isinstance(pipeline.get("config"), dict) else {}
+    quality = config.get("quality") or ticket.get("quality")
+    command = [sys.executable, "-m", "vitrine", "--run-dir", str(run_dir)]
+    if isinstance(quality, str) and quality.strip():
+        command.extend(["--quality", quality.strip()])
+    command.extend(["run"])
+    if resume:
+        command.append("--resume")
+    source = run_dir / "source"
+    command.extend(["--source", str(source), "--originals", str(source)])
+    title = ticket.get("title") or config.get("title")
+    subject = ticket.get("subject") or config.get("subject")
+    if isinstance(title, str) and title.strip():
+        command.extend(["--title", title.strip()])
+    if isinstance(subject, str) and subject.strip():
+        command.extend(["--subject", subject.strip()])
+    capture_type = ticket.get("capture_type") or config.get("capture_type")
+    if capture_type in ("scene", "object"):
+        command.extend(["--capture-type", capture_type])
+    return command
+
+
+def _launch_capture(run_dir: Path, command: list[str], project_root: Path) -> subprocess.Popen:
+    """Start a pipeline child with a persistent log and Windows-safe flags."""
+    run_dir = Path(run_dir)
+    logs = run_dir / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    log_path = run_dir / "capture.log"
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    with log_path.open("ab") as capture_log:
+        # Keep the descriptor open in the child; Popen duplicates it on both
+        # Windows and POSIX before this context closes.
+        return subprocess.Popen(
+            command,
+            cwd=project_root,
+            stdin=subprocess.DEVNULL,
+            stdout=capture_log,
+            stderr=subprocess.STDOUT,
+            creationflags=creation_flags,
+        )
 
 
 def _mtime_age_seconds(path: Path) -> float | None:
@@ -211,6 +532,8 @@ def _stage_status(run_dir: Path) -> dict[str, Any]:
     )
     train_interrupted = progress is not None and not train_running
     eval_report = _read_json(evaluation)
+    cleanup = run_dir / "model" / "scene.cleaned.ply"
+    pipeline = _pipeline_record(run_dir)
 
     stages = {
         "ingest": {
@@ -235,6 +558,16 @@ def _stage_status(run_dir: Path) -> dict[str, Any]:
             "has_checkpoint": (run_dir / "model" / "checkpoint_10000.ply").is_file(),
             "progress_age_seconds": round(progress_age) if progress_age is not None else None,
         },
+        "cleanup": {
+            "done": cleanup.is_file(),
+            "has_ply": cleanup.is_file(),
+            "report": None,
+        },
+        "export": {
+            "done": scene_splat.is_file(),
+            "has_splat": scene_splat.is_file(),
+            "report": _read_json(run_dir / "model" / "export.json"),
+        },
         "evaluate": {
             "done": eval_report is not None,
             "report": eval_report,
@@ -250,7 +583,34 @@ def _stage_status(run_dir: Path) -> dict[str, Any]:
         },
     }
 
-    order = ("ingest", "sfm", "train", "evaluate", "package", "view")
+    # The durable pipeline record is authoritative for stage state while a
+    # run is active or has failed. The artefact-derived fields above remain
+    # useful for older runs that predate pipeline.json.
+    pipeline_stages = pipeline.get("stages") if isinstance(pipeline, dict) else None
+    if isinstance(pipeline_stages, dict) and pipeline_stages:
+        for name, record in pipeline_stages.items():
+            if not isinstance(record, dict):
+                continue
+            stage = stages.setdefault(name, {})
+            state = record.get("state")
+            if isinstance(state, str):
+                stage["pipeline_state"] = state
+                stage["state"] = state
+                stage["running"] = state == "running"
+                stage["interrupted"] = state == "cancelled"
+                stage["failed"] = state == "failed"
+                if state == "complete":
+                    stage["done"] = True
+                if state in {"failed", "cancelled"}:
+                    stage["error"] = record.get("error")
+            for key in ("seconds", "started", "error", "outputs"):
+                if key in record:
+                    stage[key] = record[key]
+        order = tuple(name for name in pipeline_stages if name in stages)
+        # Keep read-only dashboard stages which are absent from a newer record.
+        order += tuple(name for name in ("evaluate", "view") if name not in order)
+    else:
+        order = ("ingest", "sfm", "train", "evaluate", "export", "package", "view")
     done_count = sum(1 for k in order if stages[k]["done"])
     return {
         "stages": stages,
@@ -419,6 +779,7 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
         samples = [{"name": "Splat preview", "kind": "splat-render",
                     "url": f"/files/{quote(name)}/model/library-hero.jpg?v={hero.stat().st_mtime_ns}"}]
     status = _stage_status(run_dir)
+    pipeline = _pipeline_record(run_dir)
     train = status["stages"]["train"]["report"] or {}
     ingest = status["stages"]["ingest"]["report"] or {}
     sfm = status["stages"]["sfm"]["report"] or {}
@@ -450,8 +811,13 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
     model_info = artefacts["scene_ply"] or artefacts["scene_splat"]
     splat_created_mtime = model_info["mtime"] if model_info else None
 
-    running = status["stages"]["train"]["running"]
-    interrupted = status["stages"]["train"]["interrupted"]
+    pipeline_state = pipeline.get("state") if isinstance(pipeline, dict) else None
+    pipeline_active = pipeline_state in {"running", "queued"}
+    running = pipeline_active or status["stages"]["train"].get("running", False)
+    interrupted = (
+        pipeline_state in {"failed", "cancelled"}
+        or status["stages"]["train"].get("interrupted", False)
+    ) and not running
     # progress.json (running=True, or a stale interrupted mid-run) has no
     # final_psnr/minutes/peak_vram_gb — those only exist on train.json. Fall
     # back to the most recent periodic eval in its history so headline cards
@@ -515,6 +881,8 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
             "iterations": train.get("iterations"),
             "running": running,
             "interrupted": interrupted,
+            "pipeline_state": pipeline_state,
+            "pipeline_error": pipeline.get("error") if isinstance(pipeline, dict) else None,
             "step": train.get("step") if (running or interrupted) else None,
             "eta_minutes": train.get("eta_minutes") if running else None,
             "energy_kwh": energy_kwh,
@@ -523,6 +891,7 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
         },
         "artefacts": artefacts,
         "objects": _objects_summary(run_dir),
+        "pipeline": pipeline,
         "has_viewer": bool(artefacts["scene_splat"]),
         "viewer_url": f"/viewer/{name}" if artefacts["scene_splat"] else None,
         "splat_url": f"/files/{name}/model/scene.splat" if artefacts["scene_splat"] else None,
@@ -664,9 +1033,10 @@ def _profiles_payload() -> list[dict[str, Any]]:
     for tier in profiles.TIERS:
         for quality in profiles.QUALITY_LEVELS:
             p = profiles.resolve(quality, tier)
+            minutes = p.estimated_minutes()
             rows.append({
                 **profiles.describe(p),
-                "estimated_minutes": round(p.estimated_minutes(), 1),
+                "estimated_minutes": round(minutes, 1) if minutes is not None else None,
                 "tier": tier,
                 "quality": quality,
             })
@@ -714,10 +1084,32 @@ class VitrineHandler(SimpleHTTPRequestHandler):
     mesh_processes: dict[str, subprocess.Popen] = {}
 
     def _with_capture_job(self, run: dict[str, Any]) -> dict[str, Any]:
+        pipeline = run.get("pipeline") or {}
         process = self.capture_processes.get(run["name"])
         if process is not None:
             code = process.poll()
-            run["capture_job"] = {"running": code is None, "returncode": code}
+            job = {"running": code is None, "returncode": code, "process_id": process.pid}
+            if code is not None and code != 0:
+                if pipeline.get("state") not in {"complete", "completed", "failed", "cancelled"}:
+                    pipeline = dict(pipeline)
+                    pipeline["state"] = "failed"
+                    pipeline.setdefault("error", f"pipeline exited with code {code}")
+                    run["pipeline"] = pipeline
+                job["error"] = pipeline.get("error")
+            run["capture_job"] = job
+        elif pipeline.get("state") in {"running", "queued"}:
+            # A dashboard restart loses the in-memory Popen handle. Use the
+            # persisted PID as a hint, while explicitly exposing stale state
+            # so the UI can offer Resume rather than showing a false spinner.
+            pid = pipeline.get("pid")
+            active = _pid_is_running(pid)
+            run["capture_job"] = {
+                "running": active,
+                "returncode": None,
+                "process_id": pid if isinstance(pid, int) else None,
+                "stale": not active,
+                "error": None if active else "The saved pipeline is no longer running; resume it to continue.",
+            }
         return run
 
     def _visible(self, name: str) -> bool:
@@ -808,6 +1200,28 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                 "profiles": _profiles_payload(),
             })
 
+        if path == "/api/preflight":
+            query = parse_qs(parsed.query)
+            requested = (query.get("run") or [None])[0]
+            full = (query.get("full") or query.get("quick") or ["0"])[0].lower() in {"1", "true", "yes", "full"}
+            run_dir = None
+            if requested:
+                requested = unquote(str(requested)).strip()
+                if not self._visible(requested):
+                    return self._send_json({"error": "run not found"}, status=404)
+                run_dir = _safe_run_dir(self.runs_root, requested)
+                if run_dir is None:
+                    return self._send_json({"error": "run not found"}, status=404)
+            source = run_dir / "source" if run_dir is not None and (run_dir / "source").exists() else None
+            report = _preflight_payload(
+                source=source,
+                output=run_dir or self.runs_root,
+                full=full,
+            )
+            if requested:
+                report["run"] = requested
+            return self._send_json(report)
+
         if path == "/api/construction":
             from .live_build import activity
             return self._send_json({"jobs": [j for j in activity(self.runs_root)["jobs"] if self._visible(j["run"])]})
@@ -855,6 +1269,15 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                 detail["samples"] = _list_image_samples(run_dir)
                 # Include full reports for the detail pane (already in stages).
                 return self._send_json(detail)
+            if len(parts) == 2 and parts[1] == "summary":
+                return self._send_json(self._with_capture_job(_summarise_run(run_dir)))
+            if len(parts) == 2 and parts[1] == "preflight":
+                query = parse_qs(parsed.query)
+                full = (query.get("full") or ["0"])[0].lower() in {"1", "true", "yes", "full"}
+                source = run_dir / "source" if (run_dir / "source").exists() else None
+                report = _preflight_payload(source=source, output=run_dir, full=full)
+                report["run"] = name
+                return self._send_json(report)
             if len(parts) == 2 and parts[1] == "construction":
                 from .construction import construction_payload
                 experiment = (parse_qs(parsed.query).get("experiment") or [None])[0]
@@ -937,6 +1360,49 @@ class VitrineHandler(SimpleHTTPRequestHandler):
         """Accept local capture media and start the existing CLI pipeline."""
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
+        control = re.fullmatch(r"/api/runs/([^/]+)/(resume|cancel|open-folder)", path)
+        if control:
+            name, action = control[1], control[2]
+            run_dir = _safe_run_dir(self.runs_root, name) if self._visible(name) else None
+            if run_dir is None:
+                return self._send_json({"error": "run not found"}, status=404)
+            if self.headers.get("Origin") and urlparse(self.headers["Origin"]).netloc != self.headers.get("Host"):
+                return self._send_json({"error": "local workspace request required"}, status=403)
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 4096:
+                    raise ValueError("Expected a small JSON request")
+                json.loads(self.rfile.read(length))
+                from .construction import atomic_json, read_json
+                with self.management_lock:
+                    state = read_json(run_dir / "pipeline.json")
+                    process = self.capture_processes.get(name)
+                    active = process is not None and process.poll() is None
+                    if action == "open-folder":
+                        if os.name != "nt":
+                            raise ValueError("Open folder is available on Windows")
+                        os.startfile(str(run_dir))
+                        return self._send_json({"ok": True})
+                    if not state:
+                        raise ValueError("Historical run has no pipeline record; use individual CLI stages")
+                    if action == "cancel":
+                        if state.get("state") != "running":
+                            raise ValueError("This pipeline is not running")
+                        atomic_json(run_dir / "cancel.request", {"requested": time.time()})
+                        return self._send_json({"ok": True, "message": "Cancellation requested; completed stages are retained"})
+                    if active:
+                        raise ValueError("This capture is already running")
+                    from .pipeline import run_lock
+                    with run_lock(run_dir):
+                        pass
+                    with (run_dir / "capture.log").open("ab") as log:
+                        process = subprocess.Popen(_capture_command(run_dir, resume=True), cwd=self.project_root,
+                            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    self.capture_processes[name] = process
+                    return self._send_json({"ok": True, "process_id": process.pid}, status=202)
+            except (OSError, ValueError, RuntimeError) as exc:
+                return self._send_json({"error": str(exc)}, status=409)
         if path.startswith("/api/runs/") and path.rsplit("/", 1)[-1] in {"rename", "trash"}:
             action = path.rsplit("/", 1)[-1]
             name = path[len("/api/runs/"):].rsplit("/", 1)[0]
@@ -1091,6 +1557,7 @@ class VitrineHandler(SimpleHTTPRequestHandler):
         if not content_type.startswith("multipart/form-data"):
             return self._send_json({"error": "multipart form data required"}, status=400)
 
+        form: _MultipartForm | None = None
         try:
             form = _parse_multipart_form(self.rfile, self.headers)
             title = str(form.getfirst("title", "New capture")).strip() or "New capture"
@@ -1232,6 +1699,9 @@ class VitrineHandler(SimpleHTTPRequestHandler):
         except (OSError, ValueError) as exc:
             logger.exception("capture upload failed")
             return self._send_json({"error": str(exc)}, status=500)
+        finally:
+            if form is not None:
+                form.close()
 
 
 def serve(

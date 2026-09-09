@@ -25,8 +25,10 @@ asserted.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -36,6 +38,112 @@ from . import undistort as undistort_module
 from .colmap_io import Model, scene_scale
 
 logger = logging.getLogger(__name__)
+
+
+def _locate_image(root: Path, name: str) -> Path | None:
+    """Find a registered image using its COLMAP path, then its basename."""
+    direct = root / name
+    if direct.is_file():
+        return direct
+    matches = list(root.rglob(Path(name).name))
+    return matches[0] if matches else None
+
+
+def estimate_cache_bytes(model: Model, images_dir: Path, *, long_edge: int) -> tuple[int, int]:
+    """Estimate the uint8 CPU view cache before decoding any full images.
+
+    The first element is the byte total and the second is the number of
+    registered images found on disk.  The estimate follows the same resize
+    rule as :class:`ViewSet`; it opens only image headers, so a large capture
+    is checked without allocating the cache it is about to check.
+    """
+    if long_edge <= 0:
+        raise ValueError("long_edge must be positive")
+
+    root = Path(images_dir)
+    total = 0
+    found = 0
+    for image_meta in model.images:
+        path = _locate_image(root, image_meta.name)
+        if path is None:
+            continue
+        try:
+            with Image.open(path) as handle:
+                native_w, native_h = handle.size
+        except (OSError, ValueError):
+            logger.warning("could not inspect image header for RAM preflight: %s", path)
+            continue
+        scale = min(1.0, long_edge / max(native_w, native_h))
+        target_w = max(32, round(native_w * scale))
+        target_h = max(32, round(native_h * scale))
+        total += target_w * target_h * 3  # View.image is RGB uint8.
+        found += 1
+    return total, found
+
+
+def ram_guard_report(
+    model: Model,
+    images_dir: Path,
+    *,
+    long_edge: int,
+    hardware: Mapping[str, Any] | None = None,
+    runtime: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a conservative cache/RAM preflight report.
+
+    ``runtime`` may be the dictionary returned by
+    :func:`vitrine.hardware.resolve_runtime`.  When omitted, it is resolved
+    from the optional hardware detector, which works without CUDA.  A missing
+    RAM reading produces ``status='unknown'`` so a machine with an unusual OS
+    memory API is not falsely rejected.
+    """
+    estimated_bytes, found = estimate_cache_bytes(model, images_dir, long_edge=long_edge)
+    estimated_gb = estimated_bytes / 2**30
+
+    if runtime is None:
+        try:
+            from .hardware import resolve_runtime
+
+            runtime = resolve_runtime(hardware=hardware)
+        except Exception as exc:  # noqa: BLE001 - report uncertainty, do not hide loading errors
+            logger.warning("RAM preflight could not resolve host memory: %s", exc)
+            runtime = None
+
+    cache = runtime.get("cache", {}) if isinstance(runtime, Mapping) else {}
+    budget = cache.get("view_cache_budget_gb")
+    safety_factor = cache.get("safety_factor", 1.25)
+    try:
+        safety_factor = float(safety_factor)
+    except (TypeError, ValueError):
+        safety_factor = 1.25
+    required_gb = estimated_gb * max(1.0, safety_factor)
+    if isinstance(budget, (int, float)):
+        budget_gb: float | None = max(0.0, float(budget))
+    else:
+        budget_gb = None
+
+    if budget_gb is None:
+        status = "unknown"
+    else:
+        status = "ok" if required_gb <= budget_gb else "exceeded"
+
+    missing = max(0, len(model.images) - found)
+    return {
+        "status": status,
+        "long_edge": int(long_edge),
+        "registered_views": len(model.images),
+        "available_views": found,
+        "missing_views": missing,
+        "estimated_cache_bytes": estimated_bytes,
+        "estimated_cache_gb": estimated_gb,
+        "required_cache_gb": required_gb,
+        "cache_budget_gb": budget_gb,
+        # Short aliases make this report convenient for CLI/UI integrations.
+        "estimated_gb": estimated_gb,
+        "required_gb": required_gb,
+        "budget_gb": budget_gb,
+        "safety_factor": max(1.0, safety_factor),
+    }
 
 
 @dataclass
@@ -93,12 +201,42 @@ class ViewSet:
         holdout_every: int = 8,
         device: str = "cuda",
         undistort: bool = True,
+        ram_guard: bool = True,
+        hardware: Mapping[str, Any] | None = None,
+        runtime: Mapping[str, Any] | None = None,
     ) -> None:
         self.device = device
         self.scene_scale = scene_scale(model)
         self.views: list[View] = []
 
         images_dir = Path(images_dir)
+        if ram_guard:
+            report = ram_guard_report(
+                model,
+                images_dir,
+                long_edge=long_edge,
+                hardware=hardware,
+                runtime=runtime,
+            )
+            if report["status"] == "exceeded":
+                raise MemoryError(
+                    "view cache preflight exceeds the safe RAM budget: "
+                    f"{report['required_cache_gb']:.2f} GB required (including a "
+                    f"{report['safety_factor']:.2f}x decode margin), "
+                    f"{report['cache_budget_gb']:.2f} GB available at long_edge={long_edge}. "
+                    "Use a lower source resolution/profile or free system RAM."
+                )
+            if report["status"] == "unknown":
+                logger.warning(
+                    "RAM preflight could not establish a safe budget; loading %.2f GB of views",
+                    report["estimated_cache_gb"],
+                )
+            else:
+                logger.info(
+                    "RAM preflight: %.2f GB estimated, %.2f GB safe budget",
+                    report["estimated_cache_gb"],
+                    report["cache_budget_gb"],
+                )
         missing: list[str] = []
         described: set[int] = set()
 
@@ -258,11 +396,7 @@ class ViewSet:
         run stores names like ``stills/IMG_6319.jpg``. Fall back to a basename
         search for models produced by other tools.
         """
-        direct = root / name
-        if direct.is_file():
-            return direct
-        matches = list(root.rglob(Path(name).name))
-        return matches[0] if matches else None
+        return _locate_image(root, name)
 
     def __len__(self) -> int:
         return len(self.views)

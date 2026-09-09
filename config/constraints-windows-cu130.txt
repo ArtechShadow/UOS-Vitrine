@@ -1,0 +1,17 @@
+# Observed working Windows RTX 5090 environment, 2026-09-09.
+# Use with -r requirements.txt -c this-file; do not upgrade the demo venv in place.
+# An A6000 install still needs a real smoke/rehearsal check; this is not an A6000 benchmark.
+torch==2.13.0+cu130
+gsplat==1.5.3
+nvidia-cuda-nvcc==13.3.73
+nvidia-cuda-cccl==13.3.3.4.1
+nvidia-cuda-crt==13.3.73
+nvidia-cuda-runtime==13.3.29
+nvidia-nvvm==13.3.73
+numpy==2.4.6
+scipy==1.17.1
+pillow==12.3.0
+pillow-heif==1.5.0
+plyfile==1.1.5
+opencv-python==5.0.0.93
+packaging==26.3
