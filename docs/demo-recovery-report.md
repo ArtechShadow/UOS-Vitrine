@@ -233,3 +233,12 @@ The public setup guide was replaced with a generic interface/runbook reference,
 and readiness now emits only the interpreter filename. Historical Git commits
 remain untouched; private installation inventories and measurements are not
 republished in the changed guide. No approval or security policy was bypassed.
+
+
+Published implementation commit: `1754d777516e53299b3774d7822730648a2c0113`.
+Draft PR: https://github.com/ArtechShadow/UOS-Vitrine/pull/8 targeting `codex/demo`.
+A fresh detached checkout of that exact commit passed **178 tests, 5 skipped
+in 3.77 seconds**, plus compile, JavaScript syntax, Ruff and diff checks.
+The subsequent documentation-only handover update uses FETCH_HEAD so the safe
+checkout commands also work with single-branch clone refspecs. The PR identifies
+the final documentation head. No Lab transfer, installation or approval occurred.

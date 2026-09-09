@@ -39,3 +39,12 @@ Final integrated CPU software suite: **178 passed, 5 skipped** at source commit
 `6ac5df3f8e5995fe91553e6eb54cb3186a8ff192`. Readiness is BLOCKED as expected.
 Sidecar descendant termination after timeout remains a known follow-up; inspect
 attempt-owned processes before retrying. See PR for published commit/tree.
+
+
+Published implementation commit: `1754d777516e53299b3774d7822730648a2c0113`.
+Draft PR: https://github.com/ArtechShadow/UOS-Vitrine/pull/8 targeting `codex/demo`.
+A fresh detached checkout of that exact commit passed **178 tests, 5 skipped
+in 3.77 seconds**, plus compile, JavaScript syntax, Ruff and diff checks.
+The subsequent documentation-only handover update uses FETCH_HEAD so the safe
+checkout commands also work with single-branch clone refspecs. The PR identifies
+the final documentation head. No Lab transfer, installation or approval occurred.

@@ -22,7 +22,7 @@ its own worktree:
 Set-Location 'D:\UOS-Vitrine'
 git status --short --branch
 git fetch origin codex/demo-ready-20260910
-git worktree add --detach '..\UOS-Vitrine-A6000' origin/codex/demo-ready-20260910
+git worktree add --detach '..\UOS-Vitrine-A6000' FETCH_HEAD
 Set-Location '..\UOS-Vitrine-A6000'
 git status --short --branch
 ```
