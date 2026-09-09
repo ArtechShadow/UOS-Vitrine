@@ -486,6 +486,68 @@ async function api(path) {
   return res.json();
 }
 
+async function postApi(path, body = {}) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  let payload = {};
+  try {
+    payload = await res.json();
+  } catch {
+    /* keep the HTTP status as the useful error */
+  }
+  if (!res.ok) throw new Error(payload.error || `${res.status} ${res.statusText}`);
+  return payload;
+}
+
+function recoveryState(run) {
+  const headline = run?.headline || {};
+  const job = run?.capture_job || {};
+  const pipeline = run?.pipeline || {};
+  const worker = headline.worker_state || job.state || pipeline.state;
+  const running = !!(headline.running || job.running);
+  const stale = !!(job.stale || job.recovery_required || headline.worker_stale);
+  const recoverable = !!pipeline.schema && !running && (
+    stale || headline.interrupted || ["failed", "cancelled", "unknown"].includes(worker)
+  );
+  return { headline, job, pipeline, worker, running, stale, recoverable };
+}
+
+function recoveryControlsHtml(run, adv = true) {
+  const state = recoveryState(run);
+  if (!state.pipeline.schema && !state.running) return "";
+  const controls = [];
+  if (state.running) {
+    controls.push(`<button type="button" class="ghost" id="btn-cancel-run">${adv ? "Request cancel" : "Stop processing"}</button>`);
+  }
+  if (state.recoverable) {
+    controls.push(`<button type="button" class="primary" id="btn-resume-run">${adv ? "Resume pipeline" : "Resume build"}</button>`);
+  }
+  controls.push(`<button type="button" class="ghost" id="btn-refresh-run">${adv ? "Refresh state" : "Refresh"}</button>`);
+  return controls.join(" ");
+}
+
+function recoveryBannerHtml(run, adv = true) {
+  const state = recoveryState(run);
+  if (state.running) return "";
+  if (state.stale || ["unknown"].includes(state.worker)) {
+    return `<div class="live-banner interrupted" role="status">
+      ${adv ? "Pipeline worker state is unknown" : "This build needs attention"} — the worker is no longer running and no terminal state was recorded. Completed stages remain on disk.
+      ${state.recoverable ? "Use Resume to continue from verified stages." : "Inspect the log and continue from the command line."}
+    </div>`;
+  }
+  if (state.worker === "failed" || state.headline.interrupted) {
+    return `<div class="live-banner interrupted" role="status">
+      ${adv ? "Pipeline stopped before completion" : "This build stopped before completion"}. ${escapeHtml(state.job.error || state.headline.worker_error || state.pipeline.error || "Completed stages remain available.")}
+      ${state.recoverable ? "Use Resume to retry verified stages." : "Review the saved log before retrying."}
+    </div>`;
+  }
+  return "";
+}
+
 function showFlash(err) {
   if (!err) {
     flashEl.classList.add("hidden");
@@ -1133,6 +1195,31 @@ async function openRun(name) {
   }
 }
 
+async function controlRun(name, action) {
+  const label = action === "cancel" ? "Cancellation" : action === "resume" ? "Resume" : "Refresh";
+  try {
+    const result = await postApi(`/api/runs/${encodeURIComponent(name)}/${action}`);
+    if (action === "cancel") {
+      showFlash(null);
+    }
+    return result;
+  } catch (error) {
+    showFlash(new Error(`${label} failed: ${error.message}`));
+    throw error;
+  }
+}
+
+async function runRecoveryAction(name, action) {
+  const button = document.querySelector(`#btn-${action}-run`);
+  if (button) button.disabled = true;
+  try {
+    await controlRun(name, action);
+    await openRun(name);
+  } catch {
+    if (button) button.disabled = false;
+  }
+}
+
 function startLivePoll(name) {
   stopLivePoll();
   liveTimer = setInterval(async () => {
@@ -1157,6 +1244,8 @@ function startLivePoll(name) {
 function objectSeparationHtml(run, adv) {
   const flow = run.object_workflow || {};
   const outputs = flow.outputs;
+  const meshOutputs = run.object_meshes || {};
+  const meshById = new Map((meshOutputs.objects || []).map((mesh) => [mesh.object_id, mesh]));
   if (!adv && !flow.configured && !outputs && !flow.running) return "";
   const inputs = (flow.inputs || []).map((item) => `
     <a class="object-input" href="${item.url}" download>
@@ -1164,27 +1253,65 @@ function objectSeparationHtml(run, adv) {
       <strong>${escapeHtml(item.name)}</strong>
       <em>${fmtBytes(item.bytes)}</em>
     </a>`).join("");
-  const objectCards = (outputs?.objects || []).map((item) => `
+  const objectCards = (outputs?.objects || []).map((item) => {
+    const mesh = meshById.get(item.object_id);
+    const evidence = item.evidence?.items || [];
+    const identity = item.evidence?.identity || {};
+    const observations = item.evidence?.observations || [];
+    const identityText = Object.entries(identity)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" · ");
+    const observedIdentity = Object.entries(observations[0] || {})
+      .filter(([key]) => ["image_id", "camera_id", "instance_id", "detection_id", "source_frame_id"].includes(key))
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" · ");
+    const observationText = observations.length
+      ? `${observations.length} registered mask/frame association${observations.length === 1 ? "" : "s"}${observedIdentity ? ` · ${observedIdentity}` : identityText ? ` · ${identityText}` : ""}`
+      : identityText;
+    const evidenceHtml = evidence.length
+      ? `<div class="object-evidence" aria-label="Source evidence">${evidence.map((entry) => `<a href="${escapeHtml(entry.url)}" target="_blank" rel="noopener">${escapeHtml(entry.label)} ↗</a>`).join(" ")}</div>`
+      : `<span class="object-evidence-missing">No copied source or mask evidence</span>`;
+    const observedCandidate = item.asset_type === "gaussian-splat" || !!item.splat_url;
+    const meshMarker = `/files/${encodeURIComponent(run.name)}/`;
+    let meshAsset = "";
+    if (mesh?.glb_url?.startsWith(meshMarker)) {
+      try { meshAsset = decodeURIComponent(mesh.glb_url.slice(meshMarker.length)); } catch { meshAsset = ""; }
+    }
+    const meshLink = meshAsset
+      ? `<a href="/static/mesh-viewer.html?run=${encodeURIComponent(run.name)}&asset=${encodeURIComponent(meshAsset)}&label=${encodeURIComponent(item.label || item.object_id || "Object")}" target="_blank" rel="noopener">Inspect reconstructed GLB ↗</a><a href="${escapeHtml(mesh.glb_url)}" download>Download GLB ↓</a>`
+      : mesh?.url
+        ? `<a href="${escapeHtml(mesh.url)}" download>Download reconstructed PLY ↓</a>`
+        : "";
+    return `
     <article class="object-result">
       <div class="object-thumb ${item.thumb_url ? "" : "object-thumb-empty"}">
         ${item.thumb_url
-          ? `<img src="${item.thumb_url}" alt="Separated ${escapeHtml(item.label || "object")}" loading="lazy"/>`
+          ? `<img src="${escapeHtml(item.thumb_url)}" alt="Source evidence for ${escapeHtml(item.label || "object")}" loading="lazy"/>`
           : `<span aria-hidden="true">◇</span>`}
       </div>
       <div class="object-result-copy">
         <strong>${escapeHtml(item.label || item.object_id || "Unlabelled object")}</strong>
-        <span>${item.confidence != null ? `${fmt(item.confidence * 100, 0)}% confidence` : "Validated output"}${item.coverage != null ? ` · ${fmt(item.coverage * 100, 0)}% coverage` : ""}</span>
-        ${item.mesh_url ? `<a href="${item.mesh_url}" download>Download ${escapeHtml(item.mesh_name || "3D model")}</a>` : ""}
+        <span>${item.confidence != null ? `${fmt(item.confidence * 100, 0)}% carve consistency` : "Validated output"}${item.coverage != null ? ` · ${fmt(item.coverage * 100, 0)}% coverage` : ""}</span>
+        ${item.thumb_kind === "source-crop" ? `<small class="object-source-note">Source crop · evidence preview, not a mesh render</small>` : ""}
+        ${observationText ? `<small class="object-source-note mono">${escapeHtml(observationText)}</small>` : ""}
+        ${evidenceHtml}
+        ${item.splat_url ? `<a href="${escapeHtml(item.viewer_url || "#")}" target="_blank" rel="noopener">Inspect observed splat ↗</a>` : ""}
+        ${observedCandidate && !meshLink ? `<button type="button" class="soft" data-object-mesh="${escapeHtml(item.object_id || "")}" ${meshOutputs.status?.state === "running" ? "disabled" : ""}>Reconstruct surface</button>` : ""}
+        ${meshLink}
       </div>
     </article>`).join("");
+  }).join("");
+  const sidecarReady = flow.configured && flow.executable_available !== false && !flow.configuration_error;
   const status = flow.running ? "Separating objects…" : outputs
     ? `${fmt(outputs.count)} object${outputs.count === 1 ? "" : "s"} separated`
-    : !flow.configured ? "Sidecar not connected" : flow.ready ? "Ready to separate" : "3D model required";
-  const disabled = !flow.ready || !flow.configured || flow.running;
-  const reason = !flow.ready
-    ? "Build or export the splat first. The separator uses the registered views, camera poses, and available 3D model outputs."
+    : !flow.configured ? "Sidecar not connected" : !sidecarReady ? "Sidecar unavailable" : !flow.source_ready && flow.missing_inputs?.length ? "Inputs incomplete" : flow.ready ? "Ready to separate" : "3D model required";
+  const disabled = !flow.ready || flow.source_ready === false || !sidecarReady || flow.running;
+  const reason = flow.configuration_error
+    ? flow.configuration_error
     : !flow.configured
       ? "Set VITRINE_OBJECT_SIDECAR before starting the dashboard to connect the external object model."
+      : flow.source_ready === false
+        ? `Required source evidence is missing: ${(flow.missing_inputs || []).join(", ")}.`
       : "The external sidecar reads this run in place and publishes only validated, checksummed 3D outputs.";
   return `
     <section class="card object-workbench section-gap" aria-labelledby="object-separation-title">
@@ -1215,6 +1342,8 @@ function objectSeparationHtml(run, adv) {
       ${outputs?.composed_scene ? `<div class="composed-scene-link"><span>Composed scene</span><a href="${outputs.composed_scene.url}" download>Download placed GLB</a><em>Observed scene + generated object derivatives</em></div>` : ""}
       ${flow.running ? `<div class="object-progress" role="status"><i></i><span>The sidecar is processing locally. This view updates every four seconds.</span></div>` : ""}
       <div class="object-feedback" id="object-feedback" aria-live="polite"></div>
+      ${meshOutputs.status?.state === "running" ? `<div class="object-progress" role="status"><i></i><span>Surface reconstruction is running locally. The selected object remains available as an observed splat.</span></div>` : ""}
+      ${meshOutputs.status?.state === "unknown" ? `<p class="object-feedback" role="status">Surface reconstruction state is unknown; inspect the log before retrying.</p>` : ""}
     </section>`;
 }
 
@@ -1406,7 +1535,7 @@ function renderRunDetail(run) {
            ${h.eta_minutes != null ? ` · about ${fmt(h.eta_minutes, 0)} minutes remaining` : ""}
            · this page updates automatically
          </div>`
-    : h.interrupted
+    : h.interrupted && !recoveryState(run).stale
       ? adv
         ? `<div class="live-banner interrupted" role="status">
              Training interrupted at step ${fmt(h.step)}/${fmt(stages.train?.report?.iterations)}
@@ -1418,9 +1547,11 @@ function renderRunDetail(run) {
              and is not running now. The 3D model was not finished.
            </div>`
       : "";
+  const recoveryBanner = recoveryBannerHtml(run, adv);
 
   viewEl.innerHTML = `
     ${liveBanner}
+    ${recoveryBanner}
 
     <div class="page-header">
       <div>
@@ -1444,7 +1575,8 @@ function renderRunDetail(run) {
         ${
           adv
             ? `<button type="button" id="btn-log-train" class="ghost">Train log</button>
-               <button type="button" id="btn-log-sfm" class="ghost">SfM log</button>`
+               <button type="button" id="btn-log-sfm" class="ghost">SfM log</button>
+               ${recoveryControlsHtml(run, adv)}`
             : ""
         }
       </div>
@@ -1678,7 +1810,13 @@ function renderRunDetail(run) {
   $("#btn-log-sfm")?.addEventListener("click", () => loadLog(run.name, "sfm"));
   $("#btn-log-train-panel")?.addEventListener("click", () => loadLog(run.name, "train"));
   $("#btn-log-sfm-panel")?.addEventListener("click", () => loadLog(run.name, "sfm"));
+  $("#btn-resume-run")?.addEventListener("click", () => runRecoveryAction(run.name, "resume"));
+  $("#btn-cancel-run")?.addEventListener("click", () => runRecoveryAction(run.name, "cancel"));
+  $("#btn-refresh-run")?.addEventListener("click", () => openRun(run.name));
   $("#btn-separate-objects")?.addEventListener("click", () => startObjectSeparation(run.name));
+  viewEl.querySelectorAll("[data-object-mesh]").forEach((button) => {
+    button.addEventListener("click", () => startObjectMesh(run.name, button.dataset.objectMesh));
+  });
 
   if (history.length) drawHistoryChart($("#hist-chart"), history);
 }
@@ -1695,11 +1833,32 @@ async function startObjectSeparation(name) {
     if (feedback) feedback.textContent = "Object separation started.";
     const detail = await api(`/api/runs/${encodeURIComponent(name)}`);
     state.selected = detail;
+    if (!isAdv()) state.studioTab = "objects";
     renderRunDetail(detail);
     loadLog(name, "objects");
     startLivePoll(name);
   } catch (err) {
     if (feedback) feedback.textContent = String(err.message || err);
+    if (button) button.disabled = false;
+  }
+}
+
+async function startObjectMesh(name, objectId) {
+  const button = Array.from(document.querySelectorAll("[data-object-mesh]"))
+    .find((candidate) => candidate.dataset.objectMesh === objectId);
+  const feedback = document.querySelector("#object-mesh-feedback") || document.querySelector("#mesh-feedback");
+  if (button) button.disabled = true;
+  if (feedback) feedback.textContent = `Starting surface reconstruction for ${objectId}…`;
+  try {
+    const payload = await postApi(`/api/runs/${encodeURIComponent(name)}/object-meshes`, { object_id: objectId });
+    if (feedback) feedback.textContent = `Surface reconstruction started for ${payload.object_id || objectId}.`;
+    const detail = await api(`/api/runs/${encodeURIComponent(name)}`);
+    state.selected = detail;
+    if (!isAdv()) state.studioTab = "objects";
+    renderRunDetail(detail);
+    startLivePoll(name);
+  } catch (error) {
+    if (feedback) feedback.textContent = String(error.message || error);
     if (button) button.disabled = false;
   }
 }
@@ -2156,7 +2315,20 @@ function bindNav() {
 /* ---------- boot ---------- */
 
 function studioContext() {
-  return { state, viewEl, displayName, fmt, fmtBytes, openRun, switchView, loadRuns, startObjectSeparation };
+  return {
+    state,
+    viewEl,
+    displayName,
+    fmt,
+    fmtBytes,
+    openRun,
+    switchView,
+    loadRuns,
+    startObjectSeparation,
+    startObjectMesh,
+    controlRun,
+    recoveryState,
+  };
 }
 
 document.addEventListener('keydown', (event) => {
