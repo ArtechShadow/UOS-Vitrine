@@ -120,6 +120,7 @@ test case for a larger question:
 | Capability | What it provides |
 |---|---|
 | Accessible local GUI | Create, monitor, inspect and manage reconstructions visually |
+| Mobile capture session | iPhone app guides an HQ scan and hands a folder to ingest |
 | Local scene reconstruction | Produces a Gaussian Splat without uploading the capture to a cloud service |
 | Photographs and video | Combines detailed stills with continuous video coverage |
 | Multi-camera calibration | Keeps phones, lenses, resolutions and video sources correctly separated |
@@ -133,9 +134,15 @@ test case for a larger question:
 
 ## How it works
 
+Guided capture on iPhone is a separate client, **Vitrine Capture**
+(`apps/ios-capture/`). It locks exposure, walks the room-scan SOP and exports a
+session zip. Import that zip in the dashboard or with
+`python -m vitrine ingest --session path/to/session.zip`. The phone does not
+reconstruct. See [the session contract](docs/capture-session.md).
+
 ```mermaid
 flowchart TB
-    capture["Photographs and video"] --> ingest["Ingest and camera groups"]
+    capture["Vitrine Capture session or photographs and video"] --> ingest["Ingest and camera groups"]
     ingest --> poses["COLMAP camera poses"]
     poses --> train["Gaussian Splat training"]
     train --> scene["Evaluate and export scene"]
@@ -159,8 +166,9 @@ python -m vitrine ui --open
 ## Quick start
 
 Use **Python 3.11**, an NVIDIA GPU, `ffmpeg`, and Docker with GPU access.
-COLMAP runs in a container. The dashboard currently imports `cgi`, removed in
-Python 3.13, so the old blanket “Python 3.11+” compatibility claim was incorrect.
+COLMAP runs in a container. Prefer 3.11 for CUDA wheel coverage — notably
+Open3D has no Python 3.14 wheel, which is why meshing uses pymeshlab.
+The dashboard itself no longer imports ``cgi``, so it can start on 3.13.
 CUDA compilation also needs a compatible host compiler: Visual Studio C++ Build
 Tools on Windows, or a CUDA-compatible GCC on Linux. See [AGENTS.md](AGENTS.md).
 
@@ -193,6 +201,10 @@ address: if 8765 is occupied the dashboard can choose another port.
 For this prepared Windows demo workspace:
 
 ```powershell
+# One-click dashboard: Desktop "Vitrine" shortcut, or:
+.\output\Vitrine.exe
+# Rebuild the launcher:
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_launcher.ps1
 # Full capture library; optional separator requires its separate installation.
 ./scripts/start_demo.ps1
 # Focus a rehearsal on the master:
@@ -200,6 +212,10 @@ For this prepared Windows demo workspace:
 # Enable the locally installed experimental separator:
 ./scripts/start_demo.ps1 -WithObjects
 ```
+
+`Vitrine.exe` is a small native launcher. It starts the existing `.venv` dashboard
+and opens the browser; it does not pack torch, gsplat, or CUDA. Close the
+console window to stop the server.
 
 Do not start multiple servers unintentionally. The sidecar and raw captures are
 not included in a fresh checkout. See [sidecar setup](docs/sam2-object-sidecar-setup.md).

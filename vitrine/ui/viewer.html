@@ -4,7 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Vitrine — Explore in 3D</title>
-  <link rel="icon" href="/static/brand/vitrine-mark-128.png"/>
+  <link rel="icon" type="image/svg+xml" data-brand-icon href="/static/brand/vitrine-icon-dark.svg"/>
   <link rel="stylesheet" href="/static/vendor/fonts.css"/>
   <style>
     html, body {
@@ -133,6 +133,8 @@
 .spacemouse-settings label {display:flex;align-items:center;gap:8px;margin-top:12px;}
 .spacemouse-settings input[type=range] {width:95px;}
 </style>
+<script src="/static/theme.js"></script>
+<link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
 <div id="root"></div>
@@ -148,7 +150,7 @@
   <div id="err"></div>
 </div>
 <div id="bar"><i id="bar-fill"></i></div><div id="spacemouse-status" role="status" hidden></div>
-<div class="viewer-tools" aria-label="Viewer controls"><select id="viewpoint" aria-label="Camera viewpoint" hidden></select><button id="reset-view" disabled>Reset view</button><button id="toggle-info" aria-pressed="true">Hide info</button><button id="fullscreen">Fullscreen</button><button id="spacemouse" aria-pressed="false" disabled>Connect SpaceMouse</button><select id="spacemouse-speed" aria-label="SpaceMouse movement speed" hidden><option value="0.3">Slow</option><option value="1" selected>Normal</option><option value="3">Fast</option></select></div>
+<div class="viewer-tools" aria-label="Viewer controls"><select data-theme-select aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select><select id="viewpoint" aria-label="Camera viewpoint" hidden></select><button id="reset-view" disabled>Reset view</button><button id="toggle-info" aria-pressed="true">Hide info</button><button id="fullscreen">Fullscreen</button><button id="spacemouse" aria-pressed="false" disabled>Connect SpaceMouse</button><select id="spacemouse-speed" aria-label="SpaceMouse movement speed" hidden><option value="0.3">Slow</option><option value="1" selected>Normal</option><option value="3">Fast</option></select></div>
 
 <script type="importmap">
 {

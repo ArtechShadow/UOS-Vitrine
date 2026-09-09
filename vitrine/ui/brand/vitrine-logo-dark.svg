@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 330 80" fill="none"><title>Vitrine — Digital preservation</title><g transform="translate(0 7)"><g fill="none" stroke-linejoin="round" stroke-linecap="round">
+  <path d="M12 19 32 30.5V55L12 43Z" fill="#F5EEE5" fill-opacity=".055" stroke="none"/>
+  <path d="M32 30.5 52 19V43L32 55Z" fill="#FF9858" fill-opacity=".10" stroke="none"/>
+  <path d="M12 19 32 8 42 13.5M12 19V43L32 55 52 43V33M12 19 32 30.5 44 23.5M32 30.5V55" stroke="#F5EEE5" stroke-width="3.3"/>
+  <path d="m44 23.5 8-4.5" stroke="#FF9858" stroke-width="3.3"/>
+  <circle cx="48" cy="16.8" r="2.1" fill="#FF9858"/>
+  <circle cx="52" cy="25.6" r="1.65" fill="#FF9858"/>
+  <circle cx="32" cy="30.5" r="2.9" fill="#FF9858" stroke="none"/>
+</g></g><text x="82" y="42" font-family="Georgia,serif" font-size="35" font-weight="bold" letter-spacing="1.5" fill="#F5EEE5">VITRINE</text><text x="83" y="64" font-family="Segoe UI,Arial,sans-serif" font-size="12" letter-spacing="1.3" fill="#B1BDB8">DIGITAL PRESERVATION</text></svg>

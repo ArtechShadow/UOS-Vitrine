@@ -67,12 +67,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("\n  ! No nvcc. Install the CUDA wheels:  pip install nvidia-cuda-nvcc")
     if not status["host_compiler"]:
         ok = False
-        print(
-            "\n  ! No GCC <= 15 found. CUDA 13's nvcc cannot compile against GCC 16\n"
-            "    headers and will die with 'cudafe++ ... signal 11'.\n"
-            "    Fix:  sudo pacman -S gcc15\n"
-            "    Or:   export VITRINE_GCC_BIN=/path/to/dir/containing/gcc-15"
-        )
+        if cuda_toolkit.IS_WINDOWS:
+            print(
+                "\n  ! Microsoft C++ Build Tools (MSVC) not found.\n"
+                "    Install Visual Studio Build Tools with the Desktop development with C++ workload."
+            )
+        else:
+            print(
+                "\n  ! No GCC <= 15 found. CUDA 13's nvcc cannot compile against GCC 16\n"
+                "    headers and will die with 'cudafe++ ... signal 11'.\n"
+                "    Fix:  sudo pacman -S gcc15\n"
+                "    Or:   export VITRINE_GCC_BIN=/path/to/dir/containing/gcc-15"
+            )
 
     try:
         import torch
@@ -103,7 +109,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if _shutil.which("docker"):
         from .sfm import gpu_available
 
-        print(f"  docker GPU     : {'yes' if gpu_available() else 'no — COLMAP will use CPU (much slower)'}")
+        from .windows_tools import docker_engine_ready
+        if not docker_engine_ready():
+            ok = False
+            print("  docker engine  : unavailable — start Docker Desktop with Linux containers; finish WSL setup/restart if required")
+        else:
+            print(f"  docker GPU     : {'yes' if gpu_available() else 'no — COLMAP will use CPU (much slower)'}")
 
     print("\n" + ("All good." if ok else "Problems found — see the notes above."))
     return 0 if ok else 1
@@ -116,8 +127,19 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
     run_dir = _run_dir(args)
     profile = profiles.resolve(args.quality, args.tier)
+    source = Path(args.source)
+    session_path = getattr(args, "session", None)
+    if session_path:
+        from .capture_session import import_session
+
+        session = import_session(Path(session_path), run_dir)
+        source = run_dir / "source"
+        print(f"session {session.session_id}  {session.title}")
+        print(f"  {len(session.stills)} stills  {len(session.videos)} video")
+        for warning in session.warnings:
+            print(f"  warning: {warning}")
     report = ingest(
-        Path(args.source),
+        source,
         run_dir / "ingest",
         long_edge=profile.colmap_long_edge,
         stills_budget=args.stills_budget,
@@ -199,6 +221,7 @@ def cmd_package(args: argparse.Namespace) -> int:
     train_report = load(run_dir / "model" / "train.json")
     profile = profiles.resolve(args.quality, args.tier)
 
+    session_path = run_dir / "capture-session.json"
     result = build_package(
         run_dir / "archive",
         originals=[Path(p) for p in args.originals],
@@ -207,11 +230,14 @@ def cmd_package(args: argparse.Namespace) -> int:
         database=run_dir / "sfm" / "database.db",
         title=args.title,
         subject=args.subject,
+        capture_type=getattr(args, "capture_type", None) or load(run_dir / "capture.json").get("capture_type", "scene"),
         train_report=train_report,
         ingest_report=load(run_dir / "ingest" / "ingest.json"),
         sfm_report=load(run_dir / "sfm" / "sfm.json"),
         profile=profiles.describe(profile),
         objects_dir=run_dir / "objects",
+        object_meshes_dir=run_dir / "object-meshes",
+        capture_session_path=session_path if session_path.is_file() else None,
     )
     print(f"\npackage: {result.file_count} files, {result.total_bytes / 2**30:.2f} GB → {result.root}")
     return 0
@@ -222,6 +248,12 @@ _OBJECTS_UNCONFIGURED = 2
 _OBJECTS_INVALID_OUTPUT = 3
 _OBJECTS_LAUNCH_FAILED = 4
 _OBJECTS_SIDECAR_FAILED = 5
+
+
+def cmd_object_meshes(args):
+    from .object_mesh import build_object_meshes
+    build_object_meshes(_run_dir(args))
+    return 0
 
 
 def cmd_objects(args: argparse.Namespace) -> int:
@@ -293,6 +325,23 @@ def cmd_objects(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_capture_session(args: argparse.Namespace) -> int:
+    """Validate a Vitrine Capture session folder or zip without ingesting it."""
+    from .capture_session import CaptureSessionError, open_session, validate_session
+
+    try:
+        with open_session(Path(args.path)) as root:
+            session = validate_session(root)
+    except CaptureSessionError as exc:
+        print(f"invalid: {exc}", file=sys.stderr)
+        return 1
+    print(f"valid  {session.session_id}  {session.title}")
+    print(f"  {len(session.stills)} stills  {len(session.videos)} video")
+    for warning in session.warnings:
+        print(f"  warning: {warning}")
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     from .package import verify_package
 
@@ -308,10 +357,23 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Ingest → SfM → train → package, in one go."""
+    if getattr(args, "session", None) and list(args.originals) == ["source"]:
+        # Default --originals is the repo source/ tree. A session is staged into
+        # the run; package that, not whatever happens to sit at ./source.
+        args.originals = [str(Path(args.run_dir) / "source")]
+    if getattr(args, "capture_type", None):
+        from .construction import atomic_json
+        record_path = Path(args.run_dir) / "capture.json"
+        record = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else {}
+        record["capture_type"] = args.capture_type
+        atomic_json(record_path, record)
     for stage in (cmd_ingest, cmd_sfm, cmd_train, cmd_package):
-        code = stage(args)
-        if code != 0:
-            return code
+        from .construction import Progress
+        name = {cmd_ingest: "ingest", cmd_sfm: "sfm", cmd_train: "train", cmd_package: "package"}[stage]
+        with Progress(Path(args.run_dir), name) as observation:
+            code = stage(args)
+            if code != 0:
+                raise RuntimeError(f"{name} exited with code {code}")
     return 0
 
 
@@ -330,6 +392,10 @@ def cmd_profiles(args: argparse.Namespace) -> int:
 def cmd_ui(args: argparse.Namespace) -> int:
     """Serve a local dashboard over the runs/ tree (inspection only)."""
     from .serve import serve
+
+    if getattr(args, "desktop", False):
+        from .desktop import run_desktop
+        return run_desktop(port=args.port, only=args.only)
 
     only = getattr(args, "only", None) or None
     serve(
@@ -360,6 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui = sub.add_parser("ui", help="local web dashboard for runs and artefacts")
     p_ui.add_argument("--host", default="127.0.0.1")
     p_ui.add_argument("--port", type=int, default=8765)
+    p_ui.add_argument("--desktop", action="store_true", help="open the Windows desktop app")
     p_ui.add_argument("--open", action="store_true", help="open the browser")
     p_ui.add_argument(
         "--only",
@@ -372,11 +439,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ingest = sub.add_parser("ingest", help="classify, extract and select source frames")
     p_ingest.add_argument("--source", default="source")
+    p_ingest.add_argument(
+        "--session",
+        default=None,
+        help="Vitrine Capture session folder or .zip; staged into <run-dir>/source before ingest",
+    )
     p_ingest.add_argument("--stills-budget", type=int, default=400)
     p_ingest.add_argument("--video-budget", type=int, default=200)
     p_ingest.add_argument("--include", nargs="*", default=None,
                           help="only these source subfolders (e.g. stills video)")
     p_ingest.set_defaults(func=cmd_ingest)
+
+    p_session = sub.add_parser("capture-session", help="validate a Vitrine Capture session")
+    p_session_sub = p_session.add_subparsers(dest="session_command", required=True)
+    p_session_validate = p_session_sub.add_parser("validate", help="check a session folder or .zip")
+    p_session_validate.add_argument("path")
+    p_session_validate.set_defaults(func=cmd_capture_session)
 
     p_sfm = sub.add_parser("sfm", help="solve camera poses with COLMAP")
     p_sfm.add_argument("--gpu", default="auto", choices=("auto", "yes", "no"))
@@ -391,7 +469,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_package.add_argument("--originals", nargs="+", default=["source"])
     p_package.add_argument("--title", default="3D reconstruction")
     p_package.add_argument("--subject", default="Not recorded.")
+    p_package.add_argument("--capture-type", choices=("scene", "object"), default=None, help="Capture subject type (default: recorded type or scene)")
     p_package.set_defaults(func=cmd_package)
+
+    p_object_meshes = sub.add_parser("object-meshes", help="experimental separated splat to coloured mesh conversion")
+    p_object_meshes.set_defaults(func=cmd_object_meshes)
 
     p_objects = sub.add_parser("objects", help="run the external object-reconstruction sidecar")
     p_objects.add_argument("--sidecar", default=None,
@@ -410,6 +492,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="ingest + sfm + train + package")
     p_run.add_argument("--source", default="source")
+    p_run.add_argument(
+        "--session",
+        default=None,
+        help="Vitrine Capture session folder or .zip; staged into <run-dir>/source before ingest",
+    )
     p_run.add_argument("--stills-budget", type=int, default=400)
     p_run.add_argument("--video-budget", type=int, default=200)
     p_run.add_argument("--include", nargs="*", default=None)
@@ -419,6 +506,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--originals", nargs="+", default=["source"])
     p_run.add_argument("--title", default="3D reconstruction")
     p_run.add_argument("--subject", default="Not recorded.")
+    p_run.add_argument("--capture-type", choices=("scene", "object"), default=None, help="Capture subject type (default: recorded type or scene)")
     p_run.set_defaults(func=cmd_run)
 
     return parser
@@ -433,10 +521,12 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
+    from .windows_tools import configure as configure_windows_tools
+    configure_windows_tools()
     parser = build_parser()
     args = parser.parse_args(argv)
     log_file = None
-    if args.command in {"ingest", "sfm", "train", "package", "run", "objects"}:
+    if args.command in {"ingest", "sfm", "train", "package", "run", "objects", "capture-session"}:
         log_file = Path(args.run_dir) / "logs" / "vitrine.log"
     _setup_logging(args.verbose, log_file)
     try:

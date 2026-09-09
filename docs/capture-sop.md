@@ -13,6 +13,13 @@ before the installation comes down.** A `draft` run takes minutes and tells you
 whether the capture registers at all. Discovering a coverage hole while the set
 still exists is a minor inconvenience; discovering it afterwards is permanent.
 
+When a recent iPhone is available, shoot with **Vitrine Capture**
+(`apps/ios-capture/`) rather than the Camera app. It locks exposure and white
+balance, walks the orbit / height / loop / detail / video passes, and exports a
+session zip that ingest can consume without flattening camera groups. The
+contract is `docs/capture-session.md`. A draft reconstruction still runs on the
+workstation after import — the phone does not reconstruct.
+
 ---
 
 ## Equipment

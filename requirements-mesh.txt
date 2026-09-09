@@ -1,0 +1,2 @@
+# Optional existing Poisson surface exporter
+pymeshlab>=2023.12

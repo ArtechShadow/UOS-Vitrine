@@ -342,6 +342,23 @@ def ingest(
     video_budget: int = 200,
     include: list[str] | None = None,
 ) -> IngestReport:
+    from .construction import Progress
+    with Progress(out_dir, "ingest") as observer:
+        return _ingest_impl(source_dir, out_dir, long_edge=long_edge,
+                            stills_budget=stills_budget, video_budget=video_budget,
+                            include=include, observer=observer)
+
+
+def _ingest_impl(
+    source_dir: Path,
+    out_dir: Path,
+    *,
+    long_edge: int,
+    stills_budget: int = 400,
+    video_budget: int = 200,
+    include: list[str] | None = None,
+    observer=None,
+) -> IngestReport:
     """Full ingest: classify, extract, select, stage.
 
     ``out_dir/images/<group>/`` is what ``sfm`` consumes — one subdirectory per
@@ -362,6 +379,7 @@ def ingest(
         wanted = {w.lower() for w in include}
         videos = [v for v in videos if v.parent.name.lower() in wanted]
     for video in videos:
+        observer.update(message="Extracting video frames", video=video.name)
         frames_dir = out_dir / "_video_frames" / video.stem
         groups.append(extract_video_frames(video, frames_dir))
 
@@ -377,6 +395,7 @@ def ingest(
         all_rejected.extend(rejected)
         written = stage_group(group, kept, images_root, long_edge=long_edge)
         accepted += written
+        observer.update(count=accepted, unit="prepared images", message="Prepared " + group.name)
         group.paths = kept
         logger.info(
             "group %-24s %4d kept / %4d rejected  (%dx%d, %s)",

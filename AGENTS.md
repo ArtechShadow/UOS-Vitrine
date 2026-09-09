@@ -40,13 +40,18 @@ the preservation packaging matters.
 
 Same family name, different repos — never edit those from here:
 
-- Not the UI product. `~/Desktop/GitHub/UOS-Vitrine-Capture` (Vitrine Capture) is
-  the FastAPI + React app.
+- Not the FastAPI + React product. `~/Desktop/GitHub/UOS-Vitrine-Capture` is a
+  separate capture UI. Do not edit it from this tree.
 - Not the lab stack. `~/Desktop/GitHub/Vitrine` ([DreamLab-AI/Vitrine](https://github.com/DreamLab-AI/Vitrine),
   GPL-3.0) owns object segmentation, meshing ladders, Unreal export, and the
   consolidated Docker image.
 - Object segmentation (SAM3D → per-object meshes → Meshy) is explicitly
   **out of scope** and deferred; it belongs to DreamLab.
+
+The **iOS capture client** lives in this repo at `apps/ios-capture/`. It only
+writes a capture session (`docs/capture-session.md`); it does not train, run
+COLMAP, or vendor DreamLab code. LiDAR / ARKit are guidance, never a training
+source. Agents may edit that folder. Sibling repos stay off-limits.
 
 ---
 
@@ -289,6 +294,7 @@ UOS_Vitrine/
 │   ├── PROJECT-PLAN.md       ← roadmap, status, what's next
 │   ├── progress.md           ← backward-looking record of what's landed
 │   ├── capture-sop.md        ← how to shoot a room so it reconstructs well
+│   ├── capture-session.md    ← mobile app → ingest folder/zip contract
 │   ├── preservation.md       ← what the archive package contains and why
 │   ├── undistortion-finding.md      ← hard-won fact #4, full record
 │   ├── nested-cinema-04-master.md   ← hard-won fact #5, full record
@@ -306,6 +312,7 @@ UOS_Vitrine/
 │   ├── colmap_io.py          ← COLMAP text-model parsing, multi-camera
 │   ├── undistort.py          ← lens-distortion correction (§4 above)
 │   ├── dataset.py            ← ViewSet: loads + undistorts + caches views
+│   ├── capture_session.py    ← validate/stage Vitrine Capture sessions
 │   ├── ingest.py             ← frame extraction, sharpness selection
 │   ├── sfm.py                ← COLMAP driver, multi-camera aware
 │   ├── train.py              ← MCMC + crops + schedules + eval + coverage warning
@@ -315,6 +322,7 @@ UOS_Vitrine/
 │   ├── package.py            ← preservation package + manifest
 │   ├── serve.py / ui/        ← local dashboard (python -m vitrine ui)
 │   └── cli.py                 ← command line entry point
+├── apps/ios-capture/         ← Vitrine Capture iOS client (session export only)
 ├── scripts/                  ← one-off run/sweep/diagnostic scripts, not the CLI
 │   └── run_nested_cinema_04_master.py  ← the validated HQ recipe (§5 above)
 ├── branding/                  ← logos, hero art (see "Source data" above)
@@ -458,7 +466,8 @@ import.
 
 1. **Never edit the sibling repos** (`UOS-Vitrine-Capture`, DreamLab `Vitrine`)
    from this project. They are separate products with their own owners, and
-   one of them (DreamLab) is GPL-3.0 against this package's MIT.
+   one of them (DreamLab) is GPL-3.0 against this package's MIT. The in-repo
+   iOS client at `apps/ios-capture/` is allowed.
 2. **Never delete anything under `source/` or `reference/`.** All original
    capture files must remain byte-identical.
 3. **Measure, don't assume.** Every number in `profiles.py` came from a
@@ -500,6 +509,8 @@ $PY -c "from plyfile import PlyData; import numpy as np; \
 
 # dashboard (live monitoring works during training)
 $PY -m vitrine ui --open   # http://127.0.0.1:8765/
+# one-click Windows launcher (rebuild: powershell -File scripts/build_launcher.ps1)
+output/Vitrine.exe
 ```
 
 Confirm gsplat loads from cache (should print in ~0.1 s, not minutes — a

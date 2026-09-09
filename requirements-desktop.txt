@@ -1,0 +1,2 @@
+# Optional Windows desktop window; reconstruction requirements stay separate.
+pywebview==6.2.1

@@ -274,6 +274,72 @@ code, .mono {
   background: var(--bg-panel);
 }
 .capture-fields { padding: 1.25rem; display: grid; gap: 1rem; }
+.capture-source-mode {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  align-items: center;
+  padding: 0.28rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #101013;
+}
+.capture-source-mode button {
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.55rem 0.4rem;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 2.7rem;
+}
+.capture-source-mode button[aria-selected="true"] {
+  background: var(--orange-dim);
+  color: var(--cream);
+  box-shadow: inset 0 0 0 1px rgba(255, 106, 0, 0.35);
+}
+.capture-source-mode button.is-locked {
+  flex-direction: column;
+  gap: 0.22rem;
+  padding: 0.4rem 0.35rem;
+}
+.capture-source-mode button:disabled,
+.capture-source-mode button[aria-disabled="true"] {
+  cursor: not-allowed;
+  color: var(--faint);
+  opacity: 1;
+}
+.capture-source-mode button:disabled:hover,
+.capture-source-mode button:disabled:active,
+.capture-source-mode button[aria-disabled="true"]:hover,
+.capture-source-mode button[aria-disabled="true"]:active {
+  background: transparent;
+  transform: none;
+}
+.capture-source-mode .coming-soon {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--amber);
+  background: var(--amber-dim);
+  padding: 0.14rem 0.4rem;
+  border-radius: 999px;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+.capture-session-warnings {
+  flex-basis: 100%;
+  margin: 0.15rem 0 0;
+  color: var(--amber);
+  font-size: 0.8rem;
+}
 .capture-fields label { display: grid; gap: 0.42rem; }
 .capture-fields label > span {
   font-size: 0.75rem;

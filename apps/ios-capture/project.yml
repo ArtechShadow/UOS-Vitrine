@@ -1,0 +1,28 @@
+name: VitrineCapture
+options:
+  bundleIdPrefix: uk.ac.salford.xrlab
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1"
+    INFOPLIST_FILE: VitrineCapture/Info.plist
+    PRODUCT_BUNDLE_IDENTIFIER: uk.ac.salford.xrlab.vitrinecapture
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  VitrineCapture:
+    type: application
+    platform: iOS
+    sources:
+      - VitrineCapture
+    info:
+      path: VitrineCapture/Info.plist
+      properties:
+        CFBundleDisplayName: Vitrine Capture
+        UILaunchScreen: {}
+        NSCameraUsageDescription: Vitrine Capture photographs the space for a preservation reconstruction.
+        NSMicrophoneUsageDescription: Optional video glue passes may include ambient sound.
+        NSWorldSensingUsageDescription: Scene understanding paints coverage so holes are visible before you leave.

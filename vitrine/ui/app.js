@@ -695,13 +695,21 @@ function renderCreate() {
     <div class="create-shell">
       <header class="create-intro">
         <p class="page-kicker">01 / Images</p>
-        <h2>Start with a space.</h2>
-        <p>Add overlapping photographs or a video of one place. Give your capture a name, then build its 3D splat.</p>
+        <h2 id="capture-heading">Start with a space.</h2>
+        <p id="capture-description">Add overlapping photographs and video of one place. Give the capture a name, then build its 3D splat.</p>
       </header>
-      <div class="studio-process" aria-label="Capture workflow"><div><span>01</span><strong>Add images</strong><small>Choose your source material</small></div><div><span>02</span><strong>Build a 3D splat</strong><small>Map cameras and reconstruct</small></div><div><span>03</span><strong>Separate objects</strong><small>Review with a connected sidecar</small></div></div>
+      <div class="studio-process" aria-label="Capture workflow"><div><span>01</span><strong>Add images</strong><small>Photographs and video</small></div><div><span>02</span><strong>Build a 3D splat</strong><small>Map cameras and reconstruct</small></div><div><span>03</span><strong>Explore & preserve</strong><small>Review the splat and its archive</small></div></div>
 
       <form id="capture-form" class="capture-form">
         <div class="capture-fields">
+          <fieldset class="capture-kind"><legend>What are you capturing?</legend>
+            <label><input type="radio" name="capture_type" value="scene" checked/><span><strong>Scene</strong><small>A room, installation or place</small></span></label>
+            <label><input type="radio" name="capture_type" value="object"/><span><strong>Object</strong><small>One item, photographed from all sides</small></span></label>
+          </fieldset>
+          <div class="capture-source-mode" role="tablist" aria-label="Source type">
+            <button type="button" role="tab" id="source-mode-media" aria-selected="true">Photographs and video</button>
+            <button type="button" role="tab" id="source-mode-session" class="is-locked" aria-selected="false" aria-disabled="true" disabled title="Vitrine App import is coming soon"><span>Vitrine App</span><span class="coming-soon">Coming soon</span></button>
+          </div>
           <label>
             <span>Capture title</span>
             <input id="capture-title" name="title" required maxlength="120" placeholder="e.g. Nested Cinema — final installation"/>
@@ -719,22 +727,27 @@ function renderCreate() {
             </select>
             <small class="muted">Build time depends on the capture. Archive quality needs validation on this workstation.</small>
           </label>
-          <div class="capture-note">
+          <div class="capture-note" id="capture-note-media">
             <strong>A little overlap goes a long way</strong>
             <span>Move around the space, keep details in focus, and capture objects from several angles. Processing stays on this computer.</span>
+          </div>
+          <div class="capture-note hidden" id="capture-note-session">
+            <strong>Keep stills and video in their folders</strong>
+            <span>A session zip from the iPhone app preserves camera groups, locked settings, and screens/mirrors decisions. Loose files cannot do that.</span>
           </div>
         </div>
 
         <div class="capture-tray" id="capture-tray">
           <input id="capture-files" name="files" type="file" multiple
             accept="image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif,video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska"/>
+          <input id="capture-session" name="session" type="file" accept=".zip,application/zip" disabled/>
           <div class="capture-tray-mark" aria-hidden="true">
             <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5"/></svg>
           </div>
-          <strong>Drop photographs or video here</strong>
-          <span>or choose files from this computer</span>
+          <strong id="capture-tray-title">Drop photographs or video here</strong>
+          <span id="capture-tray-copy">or choose files from this computer</span>
           <button type="button" class="soft" id="btn-choose-media">Choose media</button>
-          <small>JPG, PNG, HEIC, TIFF, WebP · MP4, MOV, M4V, AVI, MKV</small>
+          <small id="capture-tray-hint">JPG, PNG, HEIC, TIFF, WebP · MP4, MOV, M4V, AVI, MKV</small>
         </div>
 
         <div id="capture-selection" class="capture-selection hidden" aria-live="polite"></div>
@@ -752,13 +765,35 @@ function renderCreate() {
     </div>`;
 
   const input = $("#capture-files");
+  const sessionInput = $("#capture-session");
   const tray = $("#capture-tray");
   const choose = $("#btn-choose-media");
   const form = $("#capture-form");
   const submit = $("#btn-create-splat");
+  const setSourceMode = (mode, reset = true) => {
+    // Vitrine App session import is locked until that client ships.
+    state.captureSourceMode = mode === "session" ? "media" : mode;
+    $("#source-mode-media").setAttribute("aria-selected", "true");
+    $("#source-mode-session").setAttribute("aria-selected", "false");
+    $("#capture-note-media").classList.remove("hidden");
+    $("#capture-note-session").classList.add("hidden");
+    $("#capture-tray-title").textContent = "Drop photographs or video here";
+    $("#capture-tray-copy").textContent = "or choose files from this computer";
+    $("#capture-tray-hint").textContent = "JPG, PNG, HEIC, TIFF, WebP · MP4, MOV, M4V, AVI, MKV";
+    choose.textContent = "Choose media";
+    if (reset) {
+      input.value = "";
+      sessionInput.value = "";
+      setFiles([]);
+    }
+  };
 
   const setFiles = (files) => {
-    state.captureFiles = Array.from(files || []);
+    const session = state.captureSourceMode === "session";
+    const incoming = Array.from(files || []);
+    state.captureFiles = session
+      ? incoming.filter((file) => /\.zip$/i.test(file.name)).slice(0, 1)
+      : incoming;
     const selection = $("#capture-selection");
     if (!state.captureFiles.length) {
       selection.classList.add("hidden");
@@ -775,14 +810,16 @@ function renderCreate() {
       const url=URL.createObjectURL(file);state.capturePreviewUrls.push(url);
       return `<img src="${url}" alt="${escapeHtml(file.name)}"/>`;
     }).join('');
-    selection.innerHTML = `
-      <div><strong>${fmt(state.captureFiles.length)} file${state.captureFiles.length===1?'':'s'} ready</strong><span>${fmtBytes(total)}</span></div>
+    selection.innerHTML = session
+      ? `<div><strong>Capture session ready</strong><span>${fmtBytes(total)}</span></div><p>${escapeHtml(state.captureFiles[0].name)}</p><button type="button" class="ghost" id="clear-media">Clear selection</button>`
+      : `<div><strong>${fmt(state.captureFiles.length)} file${state.captureFiles.length===1?'':'s'} ready</strong><span>${fmtBytes(total)}</span></div>
       <p>${images ? `${fmt(images)} photograph${images === 1 ? "" : "s"}` : ""}${images && videos ? " · " : ""}${videos ? `${fmt(videos)} video${videos === 1 ? "" : "s"}` : ""}</p><div class="selected-thumbnails">${thumbnails}</div><button type="button" class="ghost" id="clear-media">Clear selection</button>`;
-    $('#clear-media').onclick=()=>{input.value='';setFiles([]);};
+    $('#clear-media').onclick=()=>{input.value='';sessionInput.value='';setFiles([]);};
     selection.classList.remove("hidden");
     submit.disabled = false;
   };
 
+  $("#source-mode-media").addEventListener("click", () => setSourceMode("media"));
   choose.addEventListener("click", () => input.click());
   input.addEventListener("change", () => setFiles(input.files));
   ["dragenter", "dragover"].forEach((name) => tray.addEventListener(name, (event) => {
@@ -803,6 +840,7 @@ function renderCreate() {
     data.append("title", $("#capture-title").value);
     data.append("subject", $("#capture-subject").value);
     data.append("quality", $("#capture-quality").value);
+    data.append("capture_type", form.elements.capture_type.value);
     state.captureFiles.forEach((file) => data.append("files", file, file.name));
 
     const progress = $("#capture-progress");
@@ -839,11 +877,15 @@ function renderCreate() {
       state.captureDraft = {};
       value.textContent = "100%";
       $("#capture-progress-label").textContent = "Media copied";
-      result.innerHTML = `<strong>Processing has started</strong><span>${escapeHtml(payload.title)} is now preparing photographs. Open its workspace to follow the build.</span><button type="button" class="soft" id="btn-open-new-run">Open capture →</button>`;
+      const warnings = (payload.session && payload.session.warnings) || [];
+      const warningHtml = warnings.length
+        ? `<p class="capture-session-warnings">${warnings.map(item => escapeHtml(item)).join(" · ")}</p>`
+        : "";
+      result.innerHTML = `<strong>Processing has started</strong><span>${escapeHtml(payload.title)} is now preparing photographs. Open its workspace to follow the build.</span>${warningHtml}<button type="button" class="soft" id="btn-open-new-run">Open capture →</button>`;
       result.className = "capture-result success";
       submit.textContent = "Started";
       await loadRuns(false);
-      $("#btn-open-new-run")?.addEventListener("click", () => openRun(payload.name));
+      await openRun(payload.name);
     });
     xhr.addEventListener("error", () => {
       state.captureUploading = false;
@@ -858,7 +900,20 @@ function renderCreate() {
   $('#capture-title').value = draft.title || '';
   $('#capture-subject').value = draft.subject || '';
   $('#capture-quality').value = draft.quality || 'standard';
-  form.addEventListener('input',()=>{state.captureDraft={title:$('#capture-title').value,subject:$('#capture-subject').value,quality:$('#capture-quality').value};});
+  form.elements.capture_type.value = draft.capture_type === 'object' ? 'object' : 'scene';
+  const updateCaptureKind = () => {
+    const object = form.elements.capture_type.value === 'object';
+    $('#capture-heading').textContent = object ? 'Preserve an object, from every angle.' : 'Start with a space.';
+    $('#capture-description').textContent = object ? 'Add overlapping photographs or a video orbit of one stationary item. Watch camera positions and its 3D splat emerge as it builds.' : 'Add overlapping photographs and video of one place. Give the capture a name, then build its 3D splat.';
+    $('#capture-title').placeholder = object ? 'e.g. Vintage radio — collection record' : 'e.g. Nested Cinema — final installation';
+    $('#capture-note-media').innerHTML = object
+      ? '<strong>Keep the object still. Move the camera.</strong><span>Walk around the object with overlapping views at low, middle and high angles. Include the top and visible details, keep focus and lighting consistent, and leave the background stationary. Do not rotate the object on a turntable or flip it between shots.</span><span>This creates an object-focused splat. Background geometry can remain; automatic isolation is a separate sidecar feature. Transparent, reflective or featureless surfaces may not reconstruct reliably.</span>'
+      : '<strong>A little overlap goes a long way</strong><span>Move around the space, keep details in focus, and capture it from several angles. Processing stays on this computer.</span>';
+  };
+  form.querySelectorAll('[name="capture_type"]').forEach(input => input.addEventListener('change', updateCaptureKind));
+  updateCaptureKind();
+  setSourceMode(state.captureSourceMode || "media", false);
+  form.addEventListener('input',()=>{state.captureDraft={capture_type:form.elements.capture_type.value,title:$('#capture-title').value,subject:$('#capture-subject').value,quality:$('#capture-quality').value};});
   if (state.captureFiles.length) setFiles(state.captureFiles);
 }
 
@@ -870,7 +925,7 @@ function teamsPanelHtml() {
       <p class="teams-label">Teams &amp; partners</p>
       <div class="teams-grid">
         <a class="team-card team-vitrine" href="/" title="Vitrine">
-          <span class="team-logo team-logo-app"><img src="/static/brand/vitrine-app-icon.png" alt=""/></span>
+          <span class="team-logo team-logo-app"><img data-brand-asset="mark" src="/static/brand/vitrine-mark-${document.documentElement.dataset.theme || 'dark'}.svg" alt=""/></span>
           <span class="team-meta">
             <strong>Vitrine</strong>
             <em>Preservation pipeline</em>
@@ -1061,7 +1116,7 @@ async function openRun(name) {
     state.selected = detail;
     renderRunDetail(detail);
     showFlash(null);
-    if (detail.headline?.running || detail.object_workflow?.running || detail.capture_job?.running) {
+    if (detail.headline?.running || detail.object_workflow?.running || detail.capture_job?.running || ["running","unknown"].includes(detail.object_meshes?.status?.state)) {
       loadLog(name, detail.object_workflow?.running ? "objects" : "train");
       startLivePoll(name);
     }
@@ -1084,7 +1139,7 @@ function startLivePoll(name) {
       state.selected = detail;
       renderRunDetail(detail);
       if (detail.headline?.running) loadLog(name, "train");
-      if (!detail.headline?.running && !detail.object_workflow?.running && !detail.capture_job?.running) stopLivePoll();
+      if (!detail.headline?.running && !detail.object_workflow?.running && !detail.capture_job?.running && !["running","unknown"].includes(detail.object_meshes?.status?.state)) stopLivePoll();
     } catch {
       /* transient */
     }
@@ -1837,7 +1892,7 @@ function renderDoctor() {
           )}
           ${row("Processing toolkit", cuda.cuda_root ? "Found" : "Not found", !!cuda.cuda_root)}
           ${row("Compiler for GPU code", cuda.host_compiler ? "Found" : "Not found", !!cuda.host_compiler)}
-          ${row("Container tools (Docker)", tools.docker ? "Installed" : "Not found", !!tools.docker)}
+          ${row("Container tools (Docker)", !tools.docker ? "Not found" : tools.docker_engine ? "Running" : "Installed — start Docker Desktop / finish WSL setup", !!tools.docker_engine)}
           ${row(
             "GPU inside containers",
             tools.docker_gpu == null
@@ -2055,6 +2110,8 @@ async function switchView(name) {
   } else if (name === "runs") {
     await loadRuns(false);
     renderRunsList();
+  } else if (name === "construction") {
+    viewEl.innerHTML = '<iframe class="construction-frame" src="/static/construction.html" title="Live reconstruction workspace" allow="fullscreen"></iframe>';
   } else if (name === "doctor") {
     if (!state.doctor) await loadHealth();
     renderDoctor();
@@ -2111,4 +2168,4 @@ bindModeToggle();
 applyModeChrome();
 bindNav();
 loadHealth();
-switchView("runs");
+switchView(new URLSearchParams(location.search).get("view") === "construction" ? "construction" : "runs");

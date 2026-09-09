@@ -100,6 +100,7 @@ def _run(
     use_gpu: bool,
     timeout: int,
     log_path: Path | None = None,
+    progress=None,
 ) -> None:
     """Run one COLMAP subcommand in the container.
 
@@ -118,16 +119,76 @@ def _run(
         command += ["-v", f"{host_path.resolve()}:{container_path}"]
     command += [image, "colmap", *args]
 
+    import threading
+    import uuid
+    from collections import deque
+    from .construction import Progress
+    from .sfm_progress import MapperSnapshots, observe_line, snapshot_options
+
+    work = next(host for host, mounted in mounts.items() if mounted == "/work")
+    mapper = args[0] == "mapper"
+    options = snapshot_options(image) if mapper and os.environ.get("VITRINE_LIVE_PREVIEWS", "1") != "0" else []
+    if options:
+        (work / "construction/raw").mkdir(parents=True, exist_ok=True)
+        command += options
+    container = "vitrine-" + uuid.uuid4().hex
+    command[2:2] = ["--name", container]
     logger.info("colmap %s", args[0])
-    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
-
-    if log_path is not None:
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(f"\n$ {' '.join(command)}\n{result.stdout}\n{result.stderr}\n")
-
-    if result.returncode != 0:
-        tail = (result.stderr or result.stdout).strip().splitlines()[-15:]
-        raise ColmapError(f"colmap {args[0]} failed:\n" + "\n".join(tail))
+    from contextlib import nullcontext
+    with (nullcontext(progress) if progress else Progress(work, "sfm")) as progress:
+        progress.update(substage=args[0], message="Starting " + args[0],
+                        count=None, total=None, unit=None,
+                        preview_error="This COLMAP version does not expose mapper snapshots" if mapper and not options else None)
+        monitor = MapperSnapshots(work, image, progress) if options else None
+        tail = deque(maxlen=15)
+        result = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, encoding="utf-8", errors="replace", bufsize=1)
+        def drain():
+            handle = None
+            try:
+                try:
+                    handle = log_path.open("a", encoding="utf-8") if log_path else None
+                    if handle:
+                        handle.write("\n$ " + " ".join(command) + "\n")
+                except OSError:
+                    if handle:
+                        handle.close()
+                    handle = None
+                for line in result.stdout:
+                    tail.append(line.rstrip())
+                    if handle:
+                        try:
+                            handle.write(line)
+                            handle.flush()
+                        except OSError:
+                            handle.close()
+                            handle = None
+                    observe_line(progress, line)
+            finally:
+                if handle:
+                    handle.close()
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+        if monitor:
+            monitor.start()
+        try:
+            code = result.wait(timeout=timeout)
+            reader.join()
+            if code:
+                raise ColmapError(f"colmap {args[0]} failed:\n" + "\n".join(tail))
+        finally:
+            if result.poll() is None:
+                # Killing the docker client alone leaves the GPU container running.
+                try:
+                    subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=15)
+                finally:
+                    result.kill()
+                    result.wait()
+            reader.join(timeout=5)
+            if not reader.is_alive():
+                result.stdout.close()
+            if monitor:
+                monitor.close()
 
 
 def _count_model(sparse_dir: Path) -> tuple[int, int, int]:
@@ -153,11 +214,29 @@ def run_sfm(
     use_gpu: bool | None = None,
     camera_model: str = "OPENCV",
 ) -> SfmResult:
+    from .construction import Progress
+    with Progress(work_dir, "sfm") as observer:
+        return _run_sfm(images_dir, work_dir, max_image_size=max_image_size,
+                        image=image, use_gpu=use_gpu, camera_model=camera_model, observer=observer)
+
+
+def _run_sfm(
+    images_dir: Path,
+    work_dir: Path,
+    *,
+    max_image_size: int,
+    image: str = DEFAULT_IMAGE,
+    use_gpu: bool | None = None,
+    camera_model: str = "OPENCV",
+    observer=None,
+) -> SfmResult:
     """Full SfM: features → matching → mapping → bundle adjustment → text model.
 
     ``images_dir`` must contain one subdirectory per camera group, as produced
     by ``ingest``.
     """
+    from functools import partial
+    run_command = partial(_run, progress=observer)
     images_dir = Path(images_dir).resolve()
     work_dir = Path(work_dir).resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -189,7 +268,7 @@ def run_sfm(
     mounts = {images_dir: "/images", work_dir: "/work"}
     gpu_flag = "1" if use_gpu else "0"
 
-    _run(
+    run_command(
         [
             "feature_extractor",
             "--database_path", "/work/database.db",
@@ -220,9 +299,9 @@ def run_sfm(
             "--SequentialMatching.loop_detection", "1",
             "--FeatureMatching.use_gpu", gpu_flag,
         ]
-    _run(match_args, mounts=mounts, image=image, use_gpu=use_gpu, timeout=14400, log_path=log_path)
+    run_command(match_args, mounts=mounts, image=image, use_gpu=use_gpu, timeout=14400, log_path=log_path)
 
-    _run(
+    run_command(
         [
             "mapper",
             "--database_path", "/work/database.db",
@@ -247,7 +326,7 @@ def run_sfm(
 
     # The mapper holds the principal point fixed. Refining it in a second pass
     # is cheap and measurably improves reprojection on phone cameras.
-    _run(
+    run_command(
         [
             "bundle_adjuster",
             "--input_path", "/work/sparse/0",
@@ -262,7 +341,7 @@ def run_sfm(
     # separate export step someone has to remember to run.
     text_dir = work_dir / "sparse_text"
     text_dir.mkdir(exist_ok=True)
-    _run(
+    run_command(
         [
             "model_converter",
             "--input_path", "/work/sparse/0",
@@ -271,6 +350,16 @@ def run_sfm(
         ],
         mounts=mounts, image=image, use_gpu=False, timeout=1800, log_path=log_path,
     )
+
+    try:
+        from .construction import SnapshotStore, atomic_json, sparse_payload
+        from .colmap_io import read_model
+        sparse = read_model(text_dir)
+        payload = sparse_payload(sparse)
+        SnapshotStore(work_dir).publish("sparse", ".json", lambda p: atomic_json(p, payload),
+                                        registered=len(sparse.images), points=len(sparse.points_xyz), final=True)
+    except Exception as exc:
+        logger.warning("Final camera preview unavailable: %s", exc)
 
     registered, cameras, points = _count_model(text_dir)
     if registered == 0:

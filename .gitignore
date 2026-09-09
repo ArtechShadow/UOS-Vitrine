@@ -21,6 +21,11 @@ tmp/
 output/
 .playwright-cli/
 
+# Windows dashboard launcher build products (source is scripts/vitrine_launcher.cs)
+scripts/vitrine.ico
+scripts/vitrine_launcher_root.cs
+scripts/Vitrine.exe
+
 # Funding-bid, pitch, and cross-partner strategy material — internal only.
 docs/ai-cop-bid-v3.md
 docs/roadmap-ai-cop.md

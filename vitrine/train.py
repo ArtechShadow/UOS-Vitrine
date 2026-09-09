@@ -281,10 +281,8 @@ def _write_progress(
     """Live training state for the UI — ``train.json``'s in-progress cousin.
 
     ``train.json`` only exists once the run finishes, which left the
-    dashboard with nothing to show for a run that's still going — this is
-    what ``vitrine ui`` polls in the meantime. Deliberately cheap: overwrite
-    one small file, no locking, tolerate readers racing a partial write
-    (``serve.py`` already treats an unparseable JSON file as "no data").
+    dashboard with nothing to show for a run that's still going. Publish one
+    small file atomically so concurrent readers retain a complete record.
     """
     elapsed_minutes = (time.time() - started) / 60.0
     steps_done = max(step, 1)
@@ -306,7 +304,8 @@ def _write_progress(
     }
     path = output_dir / "progress.json"
     try:
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        from .construction import atomic_json
+        atomic_json(path, payload)
     except OSError as exc:  # a full disk here shouldn't abort training
         logger.debug("could not write progress.json: %s", exc)
 
@@ -439,6 +438,11 @@ def evaluate(
                 temporary = construction_dir / (stem + ".tmp")
                 picture.save(temporary, format="JPEG", quality=88)
                 temporary.replace(construction_dir / (stem + ".jpg"))
+                truth_path = construction_dir / "source.jpg"
+                truth = Image.fromarray((batch.image.detach().clamp(0, 1).cpu().numpy() * 255).astype(np.uint8))
+                truth.thumbnail((960, 960))
+                truth.save(construction_dir / "source.tmp", format="JPEG", quality=88)
+                (construction_dir / "source.tmp").replace(truth_path)
                 metadata = construction_dir / (stem + ".json.tmp")
                 metadata.write_text(json.dumps({"step": construction_step,
                     "camera": views.views[index].name, "recorded_at": time.time()}), encoding="utf-8")
@@ -460,6 +464,42 @@ def train(
     save_every: int = 10000,
     seed: int = 0,
     views: ViewSet | None = None,
+) -> TrainReport:
+    """Train with observational heartbeats and bounded, best-effort previews."""
+    from .construction import Progress
+    with Progress(output_dir, "train") as observer:
+        observer.preview = None
+        if os.environ.get("VITRINE_LIVE_PREVIEWS", "1") != "0":
+            try:
+                from .construction import SnapshotStore, sparse_payload, atomic_json
+                store = SnapshotStore(output_dir)
+                if not any(r["kind"] == "sparse" for r in store.records):
+                    geometry = sparse_payload(model)
+                    store.publish("sparse", ".json", lambda p: atomic_json(p, geometry),
+                                  registered=len(model.images), points=len(model.points_xyz))
+            except Exception as exc:
+                logger.warning("Camera preview unavailable: %s", exc)
+        try:
+            return _train_impl(model, images_dir, output_dir, profile, device=device,
+                               eval_every=eval_every, save_every=save_every, seed=seed,
+                               views=views, observer=observer)
+        finally:
+            if observer.preview is not None:
+                observer.preview.close()
+
+
+def _train_impl(
+    model: Model,
+    images_dir: Path,
+    output_dir: Path,
+    profile: Profile,
+    *,
+    device: str = "cuda",
+    eval_every: int = 2000,
+    save_every: int = 10000,
+    seed: int = 0,
+    views: ViewSet | None = None,
+    observer=None,
 ) -> TrainReport:
     """Run training end to end and write ``scene.ply``.
 
@@ -631,6 +671,10 @@ def train(
     energy_kwh = 0.0
     last_power_sample_time = started
 
+    from .construction import TrainingPreview
+    observer.preview = TrainingPreview(output_dir, scene_scale, MAX_SCALE_FRACTION)
+    observer.preview.capture(params, 0, force=True)
+    last_live_status = 0.0
     for step in range(profile.iterations):
         sh_degree = _active_sh_degree(step, profile.sh_degree)
 
@@ -733,6 +777,14 @@ def train(
                 )
         means_schedule.step()
 
+        if time.monotonic() - last_live_status >= 2:
+            elapsed = time.time() - started
+            observer.update(stage="train", step=step + 1, total=profile.iterations,
+                            n_gaussians=len(params["means"]),
+                            eta_seconds=elapsed * (profile.iterations-step-1) / (step+1))
+            last_live_status = time.monotonic()
+        observer.preview.capture(params, step + 1)
+
         if step % 500 == 0:
             now = time.time()
             power = gpu_power_watts()
@@ -775,6 +827,9 @@ def train(
             _write(params, output_dir / f"checkpoint_{step}.ply", profile.sh_degree, scene_scale)
 
     minutes = (time.time() - started) / 60.0
+    observer.preview.capture(params, profile.iterations, force=True)
+    observer.update(stage="evaluate", step=profile.iterations, total=profile.iterations,
+                    message="Measuring reconstruction quality")
     final_psnr, final_ssim = evaluate(params, views, profile.sh_degree,
         construction_dir=output_dir / "construction", construction_step=profile.iterations)
     logger.info("final eval over %d held-out views: PSNR %.2f dB, SSIM %.4f",

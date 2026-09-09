@@ -229,12 +229,15 @@ def build_package(
     title: str = "3D reconstruction",
     subject: str = "Not recorded.",
     notes: str = "",
+    capture_type: str = "scene",
     train_report: dict[str, Any] | None = None,
     ingest_report: dict[str, Any] | None = None,
     sfm_report: dict[str, Any] | None = None,
     profile: dict[str, Any] | None = None,
     objects_dir: Path | None = None,
     project_root: Path | None = None,
+    capture_session_path: Path | None = None,
+    object_meshes_dir: Path | None = None,
 ) -> PackageResult:
     """Assemble the package and write ``manifest.json`` plus ``README.md``.
 
@@ -245,6 +248,8 @@ def build_package(
     ``vitrine/preservation-package/1`` — the key is additive and absent on runs
     that produced no objects, so existing packages and readers are unaffected.
     """
+    if capture_type not in ("scene", "object"):
+        raise ValueError("capture_type must be scene or object")
     output_root = Path(output_root)
     if output_root.exists():
         shutil.rmtree(output_root)
@@ -284,6 +289,28 @@ def build_package(
                 Path(objects_dir), output_root / "derivatives" / "objects"
             )
 
+    capture_session_summary: dict[str, Any] | None = None
+    if capture_session_path is not None and Path(capture_session_path).is_file():
+        session_dest = output_root / "capture-session.json"
+        shutil.copy2(capture_session_path, session_dest)
+        try:
+            session_doc = json.loads(Path(capture_session_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            session_doc = {}
+        if isinstance(session_doc, dict):
+            coverage = session_doc.get("coverage") if isinstance(session_doc.get("coverage"), dict) else {}
+            capture_session_summary = {
+                "schema": session_doc.get("schema"),
+                "session_id": session_doc.get("session_id"),
+                "screens_policy": session_doc.get("screens_policy"),
+                "mirrors_policy": session_doc.get("mirrors_policy"),
+                "stills_count": coverage.get("stills_count"),
+            }
+
+    if object_meshes_dir is not None:
+        from .object_mesh import archive_meshes
+        counts["object_meshes"] = archive_meshes(Path(object_meshes_dir), output_root / "derivatives" / "object-meshes")
+
     # Checksum everything now in place.
     files: list[dict[str, Any]] = []
     total_bytes = 0
@@ -307,6 +334,7 @@ def build_package(
         "created_utc": now.isoformat(),
         "title": title,
         "subject": subject,
+        "capture_type": capture_type,
         "software": {
             "vitrine_revision": _git_revision(project_root or Path(__file__).resolve().parent.parent),
             "colmap": _colmap_version(),
@@ -326,6 +354,8 @@ def build_package(
     if composed_scene is not None:
         # Path is relative to the archived derivatives/objects/ tree.
         manifest["composed_scene"] = composed_scene
+    if capture_session_summary is not None:
+        manifest["capture_session"] = capture_session_summary
 
     manifest_path = output_root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

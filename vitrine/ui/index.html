@@ -4,18 +4,20 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Vitrine — Digital Preservation Archive</title>
-  <link rel="icon" type="image/png" sizes="128x128" href="/static/brand/vitrine-mark-128.png"/>
-  <link rel="apple-touch-icon" href="/static/brand/vitrine-app-icon-180.png"/>
+  <link rel="icon" type="image/svg+xml" data-brand-icon href="/static/brand/vitrine-icon-dark.svg"/>
+  <link rel="apple-touch-icon" href="/static/brand/vitrine-icon-dark-180.png"/>
   <link rel="stylesheet" href="/static/vendor/fonts.css"/>
   <link rel="stylesheet" href="/static/styles.css"/>
   <link rel="stylesheet" href="/static/studio.css"/>
+<script src="/static/theme.js"></script>
+<link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
   <div class="app">
     <aside class="sidebar" aria-label="Main navigation">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">
-          <img src="/static/brand/vitrine-app-icon.png" alt="" width="48" height="48"/>
+          <img data-brand-asset="mark" src="/static/brand/vitrine-mark-dark.svg" alt="" width="48" height="48"/>
         </div>
         <div class="brand-text">
           <h1>Vitrine</h1>
@@ -43,7 +45,7 @@
           </span>
           <span class="nav-label">
             <strong data-simple="Library" data-advanced="Runs">Library</strong>
-            <em data-simple="Your preserved spaces" data-advanced="Pipeline outputs under runs/">Your preserved spaces</em>
+            <em data-simple="Your spaces and objects" data-advanced="Pipeline outputs under runs/">Your spaces and objects</em>
           </span>
         </button>
         <button type="button" data-view="profiles">
@@ -64,8 +66,10 @@
             <em data-simple="Is this computer ready?" data-advanced="CUDA · GPU · Docker · ffmpeg">Is this computer ready?</em>
           </span>
         </button>
+        <button type="button" data-view="construction"><span class="nav-label"><strong>Live construction</strong><em>Watch your capture take shape</em></span></button>
       </nav>
 
+      <label class="theme-control">Appearance<select data-theme-select aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
       <div class="mode-toggle" id="mode-toggle">
         <div class="mode-toggle-text">
           <strong>Advanced view</strong>

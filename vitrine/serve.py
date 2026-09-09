@@ -12,7 +12,7 @@ Start with::
 
 from __future__ import annotations
 
-import cgi
+import io
 import json
 import logging
 import mimetypes
@@ -35,6 +35,98 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from . import __version__, profiles
 
 logger = logging.getLogger(__name__)
+
+_DISPOSITION_PARAM = re.compile(r'(\w+)\s*=\s*("(?:\\.|[^"])*"|[^;]+)')
+
+
+class _FormField:
+    """One multipart field. File parts expose ``filename`` and ``file``."""
+
+    __slots__ = ("filename", "file", "value")
+
+    def __init__(self, *, filename: str | None, payload: bytes) -> None:
+        self.filename = filename
+        self.value = None if filename is not None else payload.decode("utf-8", errors="replace")
+        self.file = io.BytesIO(payload) if filename is not None else None
+
+
+class _MultipartForm:
+    """cgi.FieldStorage subset used by the capture upload POST handler."""
+
+    def __init__(self, fields: dict[str, list[_FormField]]) -> None:
+        self._fields = fields
+
+    def __contains__(self, name: str) -> bool:
+        return name in self._fields
+
+    def __getitem__(self, name: str) -> _FormField | list[_FormField]:
+        items = self._fields[name]
+        return items[0] if len(items) == 1 else items
+
+    def getfirst(self, name: str, default: str = "") -> str:
+        items = self._fields.get(name)
+        if not items:
+            return default
+        field = items[0]
+        if field.filename is not None:
+            return field.filename
+        return field.value if field.value is not None else default
+
+
+def _disposition_params(header: str) -> dict[str, str]:
+    params: dict[str, str] = {}
+    for match in _DISPOSITION_PARAM.finditer(header):
+        raw = match.group(2).strip()
+        if raw.startswith('"') and raw.endswith('"'):
+            raw = raw[1:-1].replace('\\"', '"')
+        params[match.group(1).lower()] = raw
+    return params
+
+
+def _parse_multipart_form(fp: Any, headers: Any) -> _MultipartForm:
+    """Parse ``multipart/form-data`` without the removed stdlib ``cgi`` module."""
+    content_type = headers.get("Content-Type", "")
+    match = re.search(r"boundary\s*=\s*(\"[^\"]+\"|[^\s;]+)", content_type, re.I)
+    if not match:
+        raise ValueError("multipart boundary missing")
+    boundary = match.group(1).strip().strip('"').encode("ascii", errors="strict")
+    try:
+        length = int(headers.get("Content-Length", "0") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid content length") from exc
+    if length < 0:
+        raise ValueError("invalid content length")
+    body = fp.read(length)
+    fields: dict[str, list[_FormField]] = {}
+    for raw in body.split(b"--" + boundary):
+        if raw.startswith(b"--"):
+            continue
+        chunk = raw[2:] if raw.startswith(b"\r\n") else raw[1:] if raw.startswith(b"\n") else raw
+        if not chunk:
+            continue
+        if chunk.endswith(b"\r\n"):
+            chunk = chunk[:-2]
+        elif chunk.endswith(b"\n"):
+            chunk = chunk[:-1]
+        header_blob, sep, payload = chunk.partition(b"\r\n\r\n")
+        if not sep:
+            header_blob, sep, payload = chunk.partition(b"\n\n")
+        if not sep:
+            continue
+        header_text = header_blob.decode("utf-8", errors="replace")
+        disposition = ""
+        for line in header_text.splitlines():
+            if line.lower().startswith("content-disposition:"):
+                disposition = line.split(":", 1)[1].strip()
+                break
+        params = _disposition_params(disposition)
+        name = params.get("name")
+        if not name:
+            continue
+        filename = params.get("filename")
+        fields.setdefault(name, []).append(_FormField(filename=filename, payload=payload))
+    return _MultipartForm(fields)
+
 
 # UI assets live next to this module.
 UI_DIR = Path(__file__).resolve().parent / "ui"
@@ -398,6 +490,7 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
     return {
         "name": name,
         "title": title if isinstance(title, str) and title.strip() else None,
+        "capture_type": capture.get("capture_type", manifest.get("capture_type", "scene")),
         "preview": samples[0] if samples else None,
         "path": str(run_dir.relative_to(PROJECT_ROOT)) if run_dir.is_relative_to(PROJECT_ROOT) else str(run_dir),
         "updated_mtime": updated_mtime,
@@ -507,8 +600,10 @@ def _doctor_payload() -> dict[str, Any]:
     tier = profiles.detect_tier()
     docker = shutil.which("docker")
     ffmpeg = shutil.which("ffmpeg")
+    from .windows_tools import docker_engine_ready
+    docker_engine = docker_engine_ready()
     docker_gpu: bool | None = None
-    if docker:
+    if docker_engine:
         try:
             from .sfm import gpu_available
 
@@ -520,7 +615,7 @@ def _doctor_payload() -> dict[str, Any]:
         status.get("cuda_root")
         and status.get("host_compiler")
         and gpu.get("available")
-        and docker
+        and docker_engine
         and ffmpeg
     )
 
@@ -534,6 +629,7 @@ def _doctor_payload() -> dict[str, Any]:
             "docker": docker,
             "ffmpeg": ffmpeg,
             "docker_gpu": docker_gpu,
+            "docker_engine": docker_engine,
         },
         "profile_preview": profiles.describe(profiles.resolve("standard", tier)),
     }
@@ -591,6 +687,7 @@ class VitrineHandler(SimpleHTTPRequestHandler):
     management_lock = threading.Lock()
     object_processes: dict[str, subprocess.Popen] = {}
     capture_processes: dict[str, subprocess.Popen] = {}
+    mesh_processes: dict[str, subprocess.Popen] = {}
 
     def _with_capture_job(self, run: dict[str, Any]) -> dict[str, Any]:
         process = self.capture_processes.get(run["name"])
@@ -689,7 +786,7 @@ class VitrineHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/construction":
             from .live_build import activity
-            return self._send_json(activity(self.runs_root))
+            return self._send_json({"jobs": [j for j in activity(self.runs_root)["jobs"] if self._visible(j["run"])]})
 
         if path.startswith("/api/construction-image/"):
             from .live_build import construction_image
@@ -729,9 +826,24 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                 detail["object_workflow"] = _object_workflow(
                     run_dir, self.object_processes.get(name)
                 )
+                from .object_mesh import mesh_summary
+                detail["object_meshes"] = mesh_summary(run_dir, self.mesh_processes.get(name))
                 detail["samples"] = _list_image_samples(run_dir)
                 # Include full reports for the detail pane (already in stages).
                 return self._send_json(detail)
+            if len(parts) == 2 and parts[1] == "construction":
+                from .construction import construction_payload
+                experiment = (parse_qs(parsed.query).get("experiment") or [None])[0]
+                folder = None
+                if experiment:
+                    folder = run_dir / "experiments" / experiment
+                    if (Path(experiment).name != experiment or experiment in (".", "..")
+                            or not folder.is_dir() or folder.is_symlink()
+                            or not folder.resolve().is_relative_to(run_dir.resolve())
+                            or folder.resolve().parent != (run_dir / "experiments").resolve()):
+                        return self._send_json({"error": "experiment not found"}, status=404)
+                return self._send_json(construction_payload(
+                    run_dir, None if folder else self.capture_processes.get(name), folder))
             if len(parts) == 2 and parts[1] == "log":
                 qs = parse_qs(parsed.query)
                 which = (qs.get("which") or ["train"])[0]
@@ -828,7 +940,7 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                         return self._send_json({"ok": True, "title": title.strip()})
                     if body.get("confirm_name") != name:
                         raise ValueError("Confirm the exact capture before removing it")
-                    processes = [self.capture_processes.get(name), self.object_processes.get(name)]
+                    processes = [self.capture_processes.get(name), self.object_processes.get(name), self.mesh_processes.get(name)]
                     if any(p is not None and p.poll() is None for p in processes) or _stage_status(run_dir)["stages"]["train"]["running"]:
                         return self._send_json({"error": "This capture is processing. Wait for it to finish before removing it."}, status=409)
                     trash = (root / ".trash").resolve()
@@ -867,6 +979,30 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                     return self._send_json({"ok": True, "name": name})
                 except OSError as exc:
                     return self._send_json({"error": str(exc)}, status=400)
+        if path.startswith("/api/runs/") and path.endswith("/object-meshes"):
+            name = path[len("/api/runs/"):-len("/object-meshes")].strip("/")
+            run_dir = _safe_run_dir(self.runs_root, name) if self._visible(name) else None
+            if run_dir is None:
+                return self._send_json({"error": "run not found"}, status=404)
+            with self.object_lock:
+                if any(p is not None and p.poll() is None for p in
+                       (self.object_processes.get(name), self.mesh_processes.get(name), self.capture_processes.get(name))):
+                    return self._send_json({"error": "Wait for this capture's processing to finish"}, status=409)
+                if not (run_dir / "objects" / "objects.json").is_file():
+                    return self._send_json({"error": "Separate objects before creating meshes"}, status=409)
+                if not (run_dir / "sfm" / "sparse_text" / "images.txt").is_file():
+                    return self._send_json({"error": "Registered source cameras are required"}, status=409)
+                logs = run_dir / "logs"
+                logs.mkdir(exist_ok=True)
+                try:
+                    with (logs / "object-meshes.log").open("ab") as log:
+                        self.mesh_processes[name] = subprocess.Popen(
+                            [sys.executable, "-m", "vitrine", "--run-dir", str(run_dir), "object-meshes"],
+                            cwd=self.project_root, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
+                except OSError as exc:
+                    return self._send_json({"error": str(exc)}, status=500)
+            return self._send_json({"ok": True}, status=202)
         if path.startswith("/api/runs/") and path.endswith("/objects"):
             name = path[len("/api/runs/") : -len("/objects")].strip("/")
             if not self._visible(name):
@@ -874,6 +1010,9 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             run_dir = _safe_run_dir(self.runs_root, name)
             if run_dir is None:
                 return self._send_json({"error": "run not found"}, status=404)
+            mesh_process = self.mesh_processes.get(name)
+            if mesh_process is not None and mesh_process.poll() is None:
+                return self._send_json({"error": "Mesh generation is running"}, status=409)
             workflow = _object_workflow(run_dir, self.object_processes.get(name))
             if workflow["running"]:
                 return self._send_json({"error": "object separation is already running"}, status=409)
@@ -900,6 +1039,9 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             try:
                 with self.object_lock, (logs_dir / "objects.log").open("ab") as log:
+                    mesh_process = self.mesh_processes.get(name)
+                    if mesh_process is not None and mesh_process.poll() is None:
+                        return self._send_json({"error": "Mesh generation is running"}, status=409)
                     current = self.object_processes.get(name)
                     if current is not None and current.poll() is None:
                         return self._send_json({"error": "object separation is already running"}, status=409)
@@ -924,26 +1066,29 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             return self._send_json({"error": "multipart form data required"}, status=400)
 
         try:
-            form = cgi.FieldStorage(
-                fp=self.rfile,
-                headers=self.headers,
-                environ={
-                    "REQUEST_METHOD": "POST",
-                    "CONTENT_TYPE": content_type,
-                    "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-                },
-                keep_blank_values=True,
-            )
+            form = _parse_multipart_form(self.rfile, self.headers)
             title = str(form.getfirst("title", "New capture")).strip() or "New capture"
             subject = str(form.getfirst("subject", "Not recorded.")).strip() or "Not recorded."
+            capture_type = str(form.getfirst("capture_type", "scene")).strip().lower()
+            if capture_type not in ("scene", "object"):
+                return self._send_json({"error": "invalid capture type"}, status=400)
             quality = str(form.getfirst("quality", "standard")).strip().lower()
             if quality not in profiles.QUALITY_LEVELS:
                 return self._send_json({"error": "invalid quality level"}, status=400)
 
-            uploads = form["files"] if "files" in form else []
-            if not isinstance(uploads, list):
-                uploads = [uploads]
-            uploads = [item for item in uploads if getattr(item, "filename", None)]
+            def _form_files(name: str) -> list:
+                items = form[name] if name in form else []
+                if not isinstance(items, list):
+                    items = [items]
+                return [item for item in items if getattr(item, "filename", None)]
+
+            uploads = _form_files("files")
+            session_uploads = _form_files("session")
+            if session_uploads:
+                return self._send_json(
+                    {"error": "Vitrine App import is coming soon. Add photographs and video instead."},
+                    status=501,
+                )
             if not uploads:
                 return self._send_json({"error": "choose at least one image or video"}, status=400)
 
@@ -959,20 +1104,56 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                 source_dir.mkdir(parents=True, exist_ok=False)
 
             saved: list[str] = []
-            for item in uploads:
-                original = Path(str(item.filename)).name
-                ext = Path(original).suffix.lower()
-                if ext not in UPLOAD_SUFFIXES:
-                    continue
-                stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(original).stem).strip(".-") or "media"
-                destination = source_dir / f"{stem[:100]}{ext}"
-                counter = 2
-                while destination.exists():
-                    destination = source_dir / f"{stem[:92]}-{counter}{ext}"
-                    counter += 1
-                with destination.open("wb") as out:
+            session_info: dict[str, Any] | None = None
+            if session_uploads:
+                from .capture_session import CaptureSessionError, import_session
+
+                if len(session_uploads) != 1:
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                    return self._send_json({"error": "upload a single capture-session .zip"}, status=400)
+                item = session_uploads[0]
+                if Path(str(item.filename)).suffix.lower() != ".zip":
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                    return self._send_json({"error": "capture session must be a .zip"}, status=400)
+                zip_path = run_dir / "incoming-session.zip"
+                with zip_path.open("wb") as out:
                     shutil.copyfileobj(item.file, out, length=1024 * 1024)
-                saved.append(destination.name)
+                try:
+                    session = import_session(zip_path, run_dir)
+                except CaptureSessionError as exc:
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                    return self._send_json({"error": str(exc)}, status=400)
+                zip_path.unlink(missing_ok=True)
+                saved = [
+                    path.relative_to(source_dir).as_posix()
+                    for path in sorted(source_dir.rglob("*"))
+                    if path.is_file()
+                ]
+                if not title or title == "New capture":
+                    title = session.title
+                if not subject or subject == "Not recorded.":
+                    subject = session.subject
+                session_info = {
+                    "session_id": session.session_id,
+                    "warnings": session.warnings,
+                    "stills": len(session.stills),
+                    "videos": len(session.videos),
+                }
+            else:
+                for item in uploads:
+                    original = Path(str(item.filename)).name
+                    ext = Path(original).suffix.lower()
+                    if ext not in UPLOAD_SUFFIXES:
+                        continue
+                    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(original).stem).strip(".-") or "media"
+                    destination = source_dir / f"{stem[:100]}{ext}"
+                    counter = 2
+                    while destination.exists():
+                        destination = source_dir / f"{stem[:92]}-{counter}{ext}"
+                        counter += 1
+                    with destination.open("wb") as out:
+                        shutil.copyfileobj(item.file, out, length=1024 * 1024)
+                    saved.append(destination.name)
 
             if not saved:
                 shutil.rmtree(run_dir, ignore_errors=True)
@@ -987,11 +1168,17 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                 "--originals", str(source_dir),
                 "--title", title,
                 "--subject", subject,
+                "--capture-type", capture_type,
             ]
             creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-            (run_dir / "capture.json").write_text(json.dumps({
-                "title": title, "subject": subject, "quality": quality, "files": saved,
-            }, indent=2), encoding="utf-8")
+            ticket = {
+                "title": title, "subject": subject, "quality": quality, "capture_type": capture_type, "files": saved,
+            }
+            if session_info:
+                ticket["source"] = "capture-session"
+                ticket["session_id"] = session_info["session_id"]
+                ticket["warnings"] = session_info["warnings"]
+            (run_dir / "capture.json").write_text(json.dumps(ticket, indent=2), encoding="utf-8")
             with (run_dir / "capture.log").open("ab") as capture_log:
                 process = subprocess.Popen(
                     command,
@@ -1004,14 +1191,18 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             self.capture_processes[name] = process
             if self.run_allowlist is not None:
                 self.run_allowlist.add(name)
-            return self._send_json({
+            payload = {
                 "ok": True,
                 "name": name,
                 "title": title,
                 "quality": quality,
                 "files": saved,
                 "process_id": process.pid,
-            }, status=202)
+                "capture_type": capture_type,
+            }
+            if session_info:
+                payload["session"] = session_info
+            return self._send_json(payload, status=202)
         except (OSError, ValueError) as exc:
             logger.exception("capture upload failed")
             return self._send_json({"error": str(exc)}, status=500)
@@ -1022,6 +1213,7 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8765,
     open_browser: bool = False,
+    on_ready=None,
     project_root: Path | None = None,
     only: list[str] | set[str] | None = None,
 ) -> None:
@@ -1076,6 +1268,9 @@ def serve(
     if allowlist:
         print(f"  showing only →  {', '.join(sorted(allowlist))}")
     print("  Ctrl-C to stop.\n")
+
+    if on_ready is not None:
+        on_ready(url, server)
 
     if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()

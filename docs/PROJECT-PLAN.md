@@ -3,6 +3,12 @@
 Living document. **`AGENTS.md` holds the facts; this file holds the plan.**
 Update the status table whenever a module lands.
 
+Live construction update, 2026-09-09: shared light/dark themes, integrated
+construction workspace, COLMAP observation and reduced-detail training preview
+exports are implemented. Browser and static checks passed; real-data geometry,
+cadence and quality/overhead acceptance remain pending. See
+[live construction](live-construction.md) for the contract and validation steps.
+
 Latest dashboard review: 2026-09-06. The historical pipeline plan below remains
 dated 2026-08-06; current presentation evidence is in
 [demo-ui-review.md](demo-ui-review.md).

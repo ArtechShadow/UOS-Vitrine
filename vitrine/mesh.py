@@ -36,8 +36,8 @@ def _backproject(
     world_to_camera: np.ndarray,  # [4, 4]
     *,
     stride: int = 2,
-    min_depth: float = 1e-3,
-    max_depth: float = 1e6,
+    min_depth: float = 0.0,
+    max_depth: float = float("inf"),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Lift a depth map into world-space points with colour."""
     height, width = depth.shape
@@ -113,6 +113,8 @@ def splat_to_pointcloud(
                 # Expected depth alongside colour: the opacity-weighted mean
                 # distance along each ray.
                 render_mode="RGB+ED",
+                near_plane=float(views.scene_scale) * 1e-5,
+                far_plane=float(views.scene_scale) * 1e4,
             )
             image = rendered[0, ..., :3].clamp(0, 1).cpu().numpy()
             depth = rendered[0, ..., 3].cpu().numpy()
@@ -232,9 +234,11 @@ def build_mesh(
     *,
     max_views: int = 120,
     depth: int = 10,
+    trim_fraction: float = 0.12,
 ) -> Path:
     """Splat to mesh, end to end."""
-    step = max(1, len(views) // max_views)
-    indices = list(range(0, len(views), step))
+    if max_views < 1 or len(views) < 1:
+        raise ValueError("At least one camera view is required")
+    indices = np.linspace(0, len(views)-1, min(max_views, len(views)), dtype=int).tolist()
     points, colours = splat_to_pointcloud(ply_path, views, indices=indices)
-    return poisson_mesh(points, colours, out_path, depth=depth)
+    return poisson_mesh(points, colours, out_path, depth=depth, keep_fraction=trim_fraction)
