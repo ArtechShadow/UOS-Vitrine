@@ -5,7 +5,6 @@ unchanged. Only complete, validated generations enter published/.
 """
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import tempfile
@@ -45,6 +44,8 @@ def publish_mesh_generation(output, root, manifest):
     if not re.fullmatch('[0-9a-f]{32}', str(generation)):
         raise ValueError('Invalid mesh generation')
     destination = Path(root)/'published'/generation
+    if destination.exists() or destination.is_symlink():
+        raise ValueError(f'Mesh generation already exists and is immutable: {generation}')
     # Copying readable mesh files tolerates Windows handles held by native
     # mesh libraries. Readers discover a generation only through latest.json.
     shutil.copytree(output, destination)
@@ -121,27 +122,14 @@ def mesh_summary(run_dir, process=None):
     return dict(status=status, objects=items)
 
 
-def splat_to_ply(source: Path, target: Path):
-    from .ply import write_splat_ply, rgb_to_sh_dc
+def build_object_meshes(run_dir: Path, *, max_views=120, long_edge=1200, poisson_depth=10,
+                        object_id: str | None = None):
+    """Build one or all evidence-backed object surfaces.
 
-    raw = np.fromfile(source, dtype=np.uint8)
-    if not raw.size or raw.size % 32:
-        raise ValueError("Invalid binary .splat length")
-    rows = raw.reshape(-1, 32)
-    geometry = rows[:, :24].copy().view('<f4').reshape(-1, 6)
-    means, scales = geometry[:, :3], geometry[:, 3:]
-    quats = (rows[:, 28:32].astype(np.float32) - 128) / 128
-    if (not np.isfinite(geometry).all() or (scales <= 0).any()
-            or (np.linalg.norm(quats, axis=1) == 0).any()):
-        raise ValueError("Splat contains invalid positions, scales or rotations")
-    opacity = np.clip(rows[:, 27].astype(np.float32) / 255, 1e-6, 1-1e-6)
-    write_splat_ply(target, means=means, scales=np.log(scales), quats=quats,
-                    opacities=np.log(opacity / (1-opacity)),
-                    sh0=rgb_to_sh_dc(rows[:, 24:27].astype(np.float32)/255)[:, None, :],
-                    shN=np.empty((len(rows), 0, 3), np.float32), sh_degree=0)
-
-
-def build_object_meshes(run_dir: Path, *, max_views=120, long_edge=1200, poisson_depth=10):
+    ``object_id`` is deliberately optional for compatibility with the batch
+    command.  When supplied, only that validated candidate is reconstructed;
+    existing published generations remain untouched if the selected run fails.
+    """
     if not (isinstance(max_views, int) and max_views > 0 and
             isinstance(long_edge, int) and 64 <= long_edge <= 4096 and
             isinstance(poisson_depth, int) and 5 <= poisson_depth <= 12):
@@ -149,6 +137,12 @@ def build_object_meshes(run_dir: Path, *, max_views=120, long_edge=1200, poisson
     from .colmap_io import read_model
     from .dataset import ViewSet
     from .mesh import build_mesh
+    from .object_support import (
+        MissingSupportEvidence,
+        bind_object_support,
+        validate_splat_geometry,
+    )
+    from .ply import read_splat_ply, verify_splat_ply
     from plyfile import PlyData
 
     run_dir = Path(run_dir).resolve()
@@ -173,6 +167,10 @@ def build_object_meshes(run_dir: Path, *, max_views=120, long_edge=1200, poisson
             records = [r for r in load_validated_objects(run_dir / 'objects') if 'splat_path' in r]
             if not records:
                 raise ValueError('No validated separated splats are available')
+            if object_id is not None:
+                records = [r for r in records if r.get('object_id') == object_id]
+                if not records:
+                    raise ValueError(f'No validated separated splat has object_id {object_id!r}')
             for rec in records:
                 if 'transform' in rec and not np.allclose(np.asarray(rec['transform']).reshape(4, 4), np.eye(4)):
                     raise ValueError('Meshing requires splats in original reconstruction coordinates; transformed assets are unsupported')
@@ -187,6 +185,7 @@ def build_object_meshes(run_dir: Path, *, max_views=120, long_edge=1200, poisson
                 raise ValueError('Refusing symlinked mesh publication directory')
             published.mkdir(exist_ok=True)
             results = []
+            scene_hash = None
             with _mesh_staging(root) as scratch:
                 folder = Path(scratch)
                 output = folder / 'result'
@@ -198,23 +197,89 @@ def build_object_meshes(run_dir: Path, *, max_views=120, long_edge=1200, poisson
                     if sha256_file(input_copy) != rec['sha256']:
                         raise ValueError('Object changed during meshing; retry after separation finishes')
                     ply = folder / 'input.ply'
-                    # The installed sidecar preserves a full-SH observed PLY.
-                    # Use it only with its recorded source-asset checksum;
-                    # otherwise the validated viewing derivative remains valid.
+                    # The installed sidecar must preserve a full-SH observed
+                    # PLY.  A web/SH0 viewing derivative is not acceptable as
+                    # the source for a supported object surface: do not
+                    # silently turn a lossy asset into a mesh.
                     full_sh = source.with_suffix('.ply')
                     expected = rec.get('provenance', {}).get('source_asset', {}).get('sha256')
-                    full_sh_hash = None
-                    if full_sh.is_file() and not full_sh.is_symlink() and expected:
-                        if sha256_file(full_sh) != expected:
-                            raise ValueError('Preserved object PLY checksum mismatch')
-                        shutil.copy2(full_sh, ply)
-                        full_sh_hash = expected
-                    else:
-                        splat_to_ply(input_copy, ply)
+                    if not expected:
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: verified full-SH source PLY checksum is missing"
+                        )
+                    if not full_sh.is_file() or full_sh.is_symlink():
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: verified full-SH source PLY is missing beside {source.name}"
+                        )
+                    if sha256_file(full_sh) != expected:
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: preserved full-SH source PLY checksum mismatch"
+                        )
+                    try:
+                        full_receipt = verify_splat_ply(
+                            full_sh, expected_sha256=str(expected).lower(), require_nonempty=True
+                        )
+                    except (OSError, ValueError) as exc:
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: preserved source PLY failed structural verification: {exc}"
+                        ) from exc
+                    if full_receipt["sh_degree"] < 1:
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: source PLY is SH0; a full-SH source is required"
+                        )
+                    shutil.copy2(full_sh, ply)
+                    full_sh_hash = full_receipt["sha256"]
+                    source_data = read_splat_ply(ply)
+                    geometry = validate_splat_geometry(
+                        source_data, float(views.scene_scale), object_id=str(rec['object_id'])
+                    )
+                    centroid = np.median(np.asarray(source_data['means'], dtype=np.float64), axis=0)
+                    support = bind_object_support(
+                        rec, model, views, run_dir / 'objects', max_views=max_views,
+                        min_views=3, object_centroid=centroid,
+                    )
+                    support.diagnostics['geometry'] = geometry
                     mesh = output / f'object-{index:04d}.ply'
                     progress.update(message=f"Reconstructing surface: {rec['label']}", count=index, total=len(records))
+                    # The model's scene master is the only valid occlusion
+                    # reference.  Guessing another scene path can silently
+                    # compare against a stale run and publish a false result.
+                    scene_ply = run_dir / 'model' / 'scene.ply'
+                    scene_ref = rec.get('provenance', {}).get('source_scene')
+                    expected_scene = scene_ref.get('sha256') if isinstance(scene_ref, dict) else None
+                    if not scene_ply.is_file() or scene_ply.is_symlink():
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: full scene PLY is required for object occlusion checks"
+                        )
+                    if not expected_scene:
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: source scene PLY checksum is missing from object provenance"
+                        )
+                    try:
+                        scene_receipt = verify_splat_ply(scene_ply, require_nonempty=True)
+                    except (OSError, ValueError) as exc:
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: scene PLY failed structural verification: {exc}"
+                        ) from exc
+                    if scene_receipt["sh_degree"] < 1:
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: scene PLY is SH0; a full-SH occlusion reference is required"
+                        )
+                    actual_scene = scene_receipt["sha256"]
+                    if scene_hash is None:
+                        scene_hash = actual_scene
+                    elif scene_hash != actual_scene:
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: scene PLY changed during the selected-object batch"
+                        )
+                    if actual_scene != str(expected_scene).lower():
+                        raise MissingSupportEvidence(
+                            f"{rec['object_id']}: source scene PLY checksum mismatch; expected "
+                            f"{expected_scene}, actual {actual_scene}"
+                        )
                     build_mesh(ply, views, mesh, trim_fraction=0, max_views=max_views,
-                               max_long_edge=long_edge, depth=poisson_depth)
+                               max_long_edge=long_edge, depth=poisson_depth,
+                               support=support, scene_ply_path=scene_ply)
                     # Memory-mapped PLYs keep a file handle open on Windows,
                     # preventing the complete output directory from being renamed.
                     data = PlyData.read(mesh, mmap=False)
@@ -235,13 +300,18 @@ def build_object_meshes(run_dir: Path, *, max_views=120, long_edge=1200, poisson
                                         source_sha256=rec['sha256'], file=mesh.name,
                                         source_ply_sha256=full_sh_hash,
                                         sha256=sha256_file(mesh), vertices=len(vertices), faces=len(faces),
-                                        glb_file=glb.name, glb_sha256=sha256_file(glb)))
+                                        glb_file=glb.name, glb_sha256=sha256_file(glb),
+                                        support=dict(
+                                            observations=[item.as_dict() for item in support.observations],
+                                            **support.diagnostics,
+                                        )))
                 manifest = dict(schema='vitrine/object-mesh/1', generation=generation,
-                                method='expected-depth-screened-poisson', experimental=True,
+                                method='mask-and-depth-supported-screened-poisson', experimental=True,
                                 parameters=dict(max_views=max_views, long_edge=long_edge, poisson_depth=poisson_depth, trim_fraction=0),
                                 cameras_sha256=sha256_file(run_dir / 'sfm' / 'sparse_text' / 'cameras.txt'),
                                 images_sha256=sha256_file(run_dir / 'sfm' / 'sparse_text' / 'images.txt'),
-                                appearance='vertex-colour from verified full-SH PLY where available; SH0 fallback recorded per object', objects=results)
+                                scene_ply_sha256=scene_hash,
+                                appearance='vertex-colour from verified full-SH PLY; no SH0 fallback in supported object path', objects=results)
                 atomic_json(output / 'manifest.json', manifest)
                 publish_mesh_generation(output, root, manifest)
             progress.update(message='Mesh derivatives ready', count=len(records), total=len(records))

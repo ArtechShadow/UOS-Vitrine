@@ -53,6 +53,10 @@ def _backproject(
 
     fx, fy = intrinsics[0, 0], intrinsics[1, 1]
     cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+    if not np.isfinite([fx, fy, cx, cy]).all() or fx <= 0 or fy <= 0:
+        raise ValueError("Cannot back-project with invalid camera intrinsics")
+    if not np.isfinite(world_to_camera).all():
+        raise ValueError("Cannot back-project with non-finite camera pose")
     camera_points = np.stack([(xs - cx) / fx * d, (ys - cy) / fy * d, d], axis=1)
 
     rotation = world_to_camera[:3, :3]
@@ -70,7 +74,10 @@ def splat_to_pointcloud(
     max_long_edge: int = 1200,
     stride: int = 2,
     depth_percentile: float = 99.0,
-) -> tuple[np.ndarray, np.ndarray]:
+    support=None,
+    scene_ply_path: Path | None = None,
+    return_diagnostics: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, dict]:
     """Render depth from each viewpoint and fuse into one coloured cloud.
 
     ``depth_percentile`` trims the far tail. Rays that miss all geometry come
@@ -88,34 +95,77 @@ def splat_to_pointcloud(
     data = read_splat_ply(Path(ply_path))
     device = views.device
 
-    def tensor(name: str) -> torch.Tensor:
-        return torch.from_numpy(np.ascontiguousarray(data[name])).float().to(device)
+    def prepare(source_data):
+        def source_tensor(name: str) -> torch.Tensor:
+            return torch.from_numpy(np.ascontiguousarray(source_data[name])).float().to(device)
 
-    means = tensor("means")
-    scales = torch.exp(tensor("scales"))
-    quats = torch.nn.functional.normalize(tensor("quats"), dim=-1)
-    opacities = torch.sigmoid(tensor("opacities"))
-    sh = torch.cat([tensor("sh0"), tensor("shN")], dim=1)
-    degree = int(data["sh_degree"])
+        return {
+            "means": source_tensor("means"),
+            "scales": torch.exp(source_tensor("scales")),
+            "quats": torch.nn.functional.normalize(source_tensor("quats"), dim=-1),
+            "opacities": torch.sigmoid(source_tensor("opacities")),
+            "sh": torch.cat([source_tensor("sh0"), source_tensor("shN")], dim=1),
+            "degree": int(source_data["sh_degree"]),
+        }
+
+    from .object_support import (
+        ObjectSupportError,
+        inspect_splat_geometry,
+        observed_bounds,
+    )
+
+    object_geometry = None
+    object_gaussians = prepare(data)
+    if support is not None:
+        object_geometry = inspect_splat_geometry(
+            data, float(support.scene_scale), object_id=str(support.object_id)
+        )
+        if not object_geometry["gaussians"]:
+            raise ObjectSupportError(f"{support.object_id}: no finite supported Gaussians remain")
+        # Raw spatial heuristics never delete source rows: a legitimate thin or
+        # disconnected part may be an outlier to a coordinate statistic.  The
+        # mask/depth/multiview gates below decide which rendered samples have
+        # evidence and record that decision in the manifest.
+
+    scene_gaussians = None
+    if support is not None and scene_ply_path is not None:
+        scene_path = Path(scene_ply_path)
+        if not scene_path.is_file() or scene_path.is_symlink():
+            raise ObjectSupportError(
+                f"{support.object_id}: full scene PLY required for occlusion checks, missing {scene_path}"
+            )
+        scene_data = read_splat_ply(scene_path)
+        scene_gaussians = prepare(scene_data)
 
     chosen = indices if indices is not None else list(range(len(views)))
+    if support is not None:
+        missing = [index for index in chosen if index not in support.view_indices]
+        if missing:
+            raise ObjectSupportError(
+                f"{support.object_id}: depth fusion requested unsupported ViewSet indices {missing[:5]}"
+            )
+        if len(chosen) < support.min_consistent_views:
+            raise ObjectSupportError(
+                f"{support.object_id}: at least {support.min_consistent_views} supported views are required"
+            )
     clouds: list[np.ndarray] = []
     colours: list[np.ndarray] = []
+
+    def render(gaussians, batch):
+        return rasterization(
+            means=gaussians["means"], quats=gaussians["quats"],
+            scales=gaussians["scales"], opacities=gaussians["opacities"],
+            colors=gaussians["sh"], viewmats=batch.world_to_camera, Ks=batch.intrinsics,
+            width=batch.width, height=batch.height, sh_degree=gaussians["degree"],
+            packed=True, rasterize_mode="antialiased", render_mode="RGB+ED",
+            near_plane=float(views.scene_scale) * 1e-5,
+            far_plane=float(views.scene_scale) * 1e4,
+        )
 
     with torch.no_grad():
         for count, index in enumerate(chosen):
             batch = views.full(index, max_long_edge=max_long_edge)
-            rendered, alpha, _ = rasterization(
-                means=means, quats=quats, scales=scales, opacities=opacities,
-                colors=sh, viewmats=batch.world_to_camera, Ks=batch.intrinsics,
-                width=batch.width, height=batch.height, sh_degree=degree,
-                packed=True, rasterize_mode="antialiased",
-                # Expected depth alongside colour: the opacity-weighted mean
-                # distance along each ray.
-                render_mode="RGB+ED",
-                near_plane=float(views.scene_scale) * 1e-5,
-                far_plane=float(views.scene_scale) * 1e4,
-            )
+            rendered, alpha, _ = render(object_gaussians, batch)
             image = rendered[0, ..., :3].clamp(0, 1).cpu().numpy()
             depth = rendered[0, ..., 3].cpu().numpy()
             coverage = alpha[0, ..., 0].cpu().numpy()
@@ -123,6 +173,31 @@ def splat_to_pointcloud(
             # Only trust pixels where enough opacity accumulated; elsewhere the
             # "depth" is an average over near-transparent space.
             depth = np.where(coverage > 0.5, depth, np.nan)
+
+            if support is not None:
+                # Masks are loaded and transformed against the exact ViewSet
+                # image.  A silhouette alone is insufficient: opacity and
+                # finite positive depth must also support every fused pixel.
+                mask = support.mask_for(index, width=batch.width, height=batch.height)
+                depth = np.where(mask, depth, np.nan)
+                support.depth_maps[index] = depth.copy()
+                support.view_shapes[index] = (batch.height, batch.width)
+
+            if scene_gaussians is not None:
+                scene_rendered, scene_alpha, _ = render(scene_gaussians, batch)
+                scene_depth = scene_rendered[0, ..., 3].cpu().numpy()
+                scene_coverage = scene_alpha[0, ..., 0].cpu().numpy()
+                scene_depth = np.where(scene_coverage > 0.5, scene_depth, np.nan)
+                # ED is kept in camera-Z convention by the gsplat backend used
+                # by this project.  The convention is recorded and compared
+                # in the same space; callers cannot silently mix ray distance
+                # with camera-Z.  A small relative tolerance covers splat
+                # thickness while rejecting an object hidden behind the scene.
+                occluded = np.isfinite(scene_depth) & np.isfinite(depth)
+                tolerance = np.maximum(np.abs(scene_depth) * 0.05, float(views.scene_scale) * 0.02)
+                depth = np.where(occluded & (depth > scene_depth + tolerance), np.nan, depth)
+                if support is not None:
+                    support.scene_depth_maps[index] = scene_depth
 
             finite = np.isfinite(depth)
             if finite.any():
@@ -145,8 +220,29 @@ def splat_to_pointcloud(
 
     points = np.concatenate(clouds)
     point_colours = np.concatenate(colours)
+    diagnostics = {
+        "views_requested": len(chosen),
+        "views_with_depth": len(clouds),
+        "raw_points": int(len(points)),
+        "depth_convention": "camera_z",
+    }
+    if support is not None:
+        # Reproject each back-projected point into the other selected views and
+        # retain points with true multi-view mask/depth agreement.  This is
+        # what prevents an in-mask but unobserved sheet from becoming a mesh.
+        from .object_support import filter_multiview_points
+        points, point_colours, consistency = filter_multiview_points(
+            points, point_colours, support, views,
+        )
+        diagnostics.update(consistency)
+        if len(points) < 32:
+            raise ObjectSupportError(
+                f"{support.object_id}: insufficient multi-view supported points ({len(points)})"
+            )
+        support.observed_bounds = observed_bounds(points, support.scene_scale)
+        support.diagnostics.update(diagnostics)
     logger.info("fused %d views into %s points", len(chosen), f"{len(points):,}")
-    return points, point_colours
+    return (points, point_colours, diagnostics) if return_diagnostics else (points, point_colours)
 
 
 def poisson_mesh(
@@ -160,10 +256,12 @@ def poisson_mesh(
 ) -> Path:
     """Screened Poisson reconstruction via pymeshlab, written to ``out_path``.
 
-    ``keep_fraction`` trims the lowest-density vertices afterwards. Poisson
-    always returns a closed watertight surface, which means it happily
-    hallucinates a shell across regions with no data — over an open doorway,
-    say. Removing the least-supported vertices cuts most of that away.
+    ``keep_fraction`` is an experimental MeshLab *volumetric obscurance*
+    scalar threshold.  It is not a measured camera/mask support value and
+    must not be used as an object acceptance gate.  The evidence-backed object
+    path passes zero and performs its own mask/depth/visibility checks after
+    meshing.  Poisson can still close unseen regions, so every output remains
+    explicitly experimental until that post-check succeeds.
     """
     try:
         import pymeshlab
@@ -189,13 +287,18 @@ def poisson_mesh(
         "fused",
     )
 
-    logger.info("estimating normals")
+    logger.info("estimating point-cloud normals (MeshLab orientation; outward orientation is unverified)")
     mesh_set.compute_normal_for_point_clouds(k=16, smoothiter=2)
 
     logger.info("screened Poisson reconstruction (depth=%d)", depth)
     mesh_set.generate_surface_reconstruction_screened_poisson(depth=depth, preclean=True)
 
     if keep_fraction > 0:
+        logger.warning(
+            "applying experimental MeshLab volumetric-obscurance trim q < %.3f; "
+            "this is not measured object support",
+            keep_fraction,
+        )
         try:
             mesh_set.compute_scalar_by_volumetric_obscurance()
         except Exception:  # noqa: BLE001 - filter names shift between versions
@@ -236,10 +339,32 @@ def build_mesh(
     depth: int = 10,
     trim_fraction: float = 0.12,
     max_long_edge: int = 1200,
+    support=None,
+    scene_ply_path: Path | None = None,
 ) -> Path:
     """Splat to mesh, end to end."""
     if max_views < 1 or len(views) < 1:
         raise ValueError("At least one camera view is required")
-    indices = np.linspace(0, len(views)-1, min(max_views, len(views)), dtype=int).tolist()
-    points, colours = splat_to_pointcloud(ply_path, views, indices=indices, max_long_edge=max_long_edge)
-    return poisson_mesh(points, colours, out_path, depth=depth, keep_fraction=trim_fraction)
+    if support is not None:
+        # Object fusion may only use frames whose exact mask/instance lineage
+        # was bound to this ViewSet.  Sampling the whole scene here would mix
+        # unsupported cameras into an object reconstruction.
+        indices = list(support.view_indices)
+        if len(indices) > max_views:
+            indices = indices[:max_views]
+    else:
+        indices = np.linspace(0, len(views)-1, min(max_views, len(views)), dtype=int).tolist()
+    points, colours = splat_to_pointcloud(
+        ply_path, views, indices=indices, max_long_edge=max_long_edge,
+        support=support, scene_ply_path=scene_ply_path,
+    )
+    result = poisson_mesh(points, colours, out_path, depth=depth, keep_fraction=trim_fraction)
+    if support is not None:
+        from .object_support import validate_mesh_support
+        from plyfile import PlyData
+        data = PlyData.read(str(result), mmap=False)
+        vertex = data["vertex"]
+        vertices = np.column_stack([vertex[key] for key in ("x", "y", "z")])
+        faces = np.asarray(data["face"]["vertex_indices"], dtype=object)
+        support.diagnostics["mesh"] = validate_mesh_support(vertices, faces, support, views)
+    return result
