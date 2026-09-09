@@ -35,7 +35,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .frame_selection import (
     GLOBAL_FRAME_SAFETY_CAP,
@@ -278,6 +278,8 @@ def classify_sources(source_dir: Path, *, include: list[str] | None = None) -> l
         try:
             with Image.open(path) as im:
                 width, height = im.size
+                if im.getexif().get(274, 1) in (5, 6, 7, 8):
+                    width, height = height, width
         except (OSError, ValueError):
             logger.warning("skipping unreadable image %s", path)
             continue
@@ -622,12 +624,24 @@ def stage_group(
     dest.mkdir(parents=True, exist_ok=True)
 
     written = 0
+    # Case-fold for the Windows destination even when preparing on Linux.
+    reserved = {p.name.casefold() for p in dest.iterdir()}
     for path in paths:
-        target = dest / f"{path.stem}.jpg"
+        name = f"{path.stem}.jpg"
+        suffix = 1
+        while name.casefold() in reserved:
+            name = f"{path.stem}__{suffix}.jpg"
+            suffix += 1
+        reserved.add(name.casefold())
+        target = dest / name
         try:
             with Image.open(path) as im:
-                exif = im.info.get("exif")
+                # Normalise pixels and orientation together before COLMAP.
+                # Focal/camera EXIF survives; originals remain byte-identical.
                 icc = im.info.get("icc_profile")
+                im = ImageOps.exif_transpose(im)
+                exif = im.getexif()
+                exif[274] = 1
                 im = im.convert("RGB")
                 width, height = im.size
                 if max(width, height) > long_edge:
@@ -638,7 +652,7 @@ def stage_group(
                     )
                 save_kwargs: dict[str, object] = {"quality": 95, "subsampling": 0}
                 if exif:
-                    save_kwargs["exif"] = exif
+                    save_kwargs["exif"] = exif.tobytes()
                 if icc:
                     save_kwargs["icc_profile"] = icc
                 im.save(target, "JPEG", **save_kwargs)

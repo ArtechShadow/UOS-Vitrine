@@ -109,3 +109,37 @@ def test_extract_default_uses_full_duration_and_adaptive_safety_rate(monkeypatch
     assert group.safety_capped is True
     assert group.extracted_fps < ingest_module.VIDEO_EXTRACT_FPS
     assert len(group.paths) == 4
+
+
+def test_staging_same_stem_and_windows_case_keeps_all_inputs(tmp_path):
+    from vitrine.ingest import stage_group
+    source = tmp_path / 'source'
+    paths = [source/'Photo.jpg', source/'Photo.png', source/'photo.JPG']
+    for i, path in enumerate(paths):
+        _save(path, value=50+i*60)
+    originals = [p.read_bytes() for p in paths]
+    group = CameraGroup('stills', 64, 48, paths=paths)
+    assert stage_group(group, paths, tmp_path/'staged', long_edge=64) == 3
+    staged = list((tmp_path/'staged/stills').glob('*.jpg'))
+    assert len(staged) == 3
+    assert len({p.name.casefold() for p in staged}) == 3
+    assert [p.read_bytes() for p in paths] == originals
+
+
+def test_staging_normalises_exif_orientation_before_colmap(tmp_path):
+    from vitrine.ingest import stage_group
+    path = tmp_path/'source'/'rotated.jpg'
+    path.parent.mkdir()
+    image = Image.new('RGB', (64, 48), 'red')
+    exif = image.getexif()
+    exif[274], exif[271] = 6, 'Fixture camera'
+    image.save(path, exif=exif)
+    original = path.read_bytes()
+    group = classify_sources(path.parent)[0]
+    assert (group.width, group.height) == (48, 64)
+    stage_group(group, [path], tmp_path/'staged', long_edge=64)
+    with Image.open(next((tmp_path/'staged').rglob('*.jpg'))) as staged:
+        assert staged.size == (48, 64)
+        assert staged.getexif()[274] == 1
+        assert staged.getexif()[271] == 'Fixture camera'
+    assert path.read_bytes() == original

@@ -56,7 +56,11 @@ def _distort(x: torch.Tensor, y: torch.Tensor, p: dict[str, float]) -> tuple[tor
     p2 = p.get("p2", 0.0)
 
     r2 = x * x + y * y
-    radial = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2
+    numerator = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2
+    denominator = 1.0 + p.get("k4", 0.0) * r2 + p.get("k5", 0.0) * r2**2 + p.get("k6", 0.0) * r2**3
+    if not bool(torch.isfinite(denominator).all()) or bool((denominator.abs() < 1e-8).any()):
+        raise ValueError("Invalid rational lens distortion denominator")
+    radial = numerator / denominator
     x_d = x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
     y_d = y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
     return x_d, y_d
@@ -107,20 +111,20 @@ def undistort(
     image: torch.Tensor,
     intrinsics: torch.Tensor,
     camera: Camera,
+    *,
+    mode: str = "bilinear",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Undistort one [H, W, 3] view. Returns the corrected image and its new K.
 
     ``intrinsics`` must already be scaled to ``image``'s resolution; distortion
     coefficients are in normalised coordinates and so need no rescaling.
-    Cameras with no distortion (or an unsupported model) are returned
-    untouched.
+    Cameras with no distortion are returned untouched. Unsupported models
+    are rejected. Use nearest sampling for masks with the same intrinsics/crop.
     """
+    if mode not in {"bilinear", "nearest"}:
+        raise ValueError("Undistortion mode must be bilinear or nearest")
     if camera.model not in _SUPPORTED:
-        logger.warning(
-            "camera %d model %s has no undistortion implementation — training on distorted views",
-            camera.id, camera.model,
-        )
-        return image, intrinsics
+        raise ValueError(f"Camera {camera.id} model {camera.model} has no supported rectification")
     if not camera.has_distortion:
         return image, intrinsics
 
@@ -151,7 +155,7 @@ def undistort(
     sampled = torch.nn.functional.grid_sample(
         image.permute(2, 0, 1).unsqueeze(0),
         grid,
-        mode="bilinear",
+        mode=mode,
         padding_mode="border",
         align_corners=True,
     ).squeeze(0).permute(1, 2, 0)

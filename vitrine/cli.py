@@ -306,11 +306,20 @@ _OBJECTS_SIDECAR_FAILED = 5
 def cmd_object_meshes(args):
     from .object_mesh import build_object_meshes
     build_object_meshes(_run_dir(args), max_views=args.mesh_max_views,
-                        long_edge=args.mesh_long_edge, poisson_depth=args.poisson_depth)
+                        long_edge=args.mesh_long_edge, poisson_depth=args.poisson_depth,
+                        object_id=getattr(args, "object_id", None))
     return 0
 
 
 def cmd_objects(args: argparse.Namespace) -> int:
+    from .pipeline import run_lock
+    root = _run_dir(args) / "object-worker"
+    root.mkdir(exist_ok=True)
+    with run_lock(root):
+        return _cmd_objects_locked(args)
+
+
+def _cmd_objects_locked(args: argparse.Namespace) -> int:
     """Run the external object-reconstruction sidecar over this run.
 
     The sidecar is a *separate* project with its own environment and model
@@ -323,10 +332,12 @@ def cmd_objects(args: argparse.Namespace) -> int:
     The sidecar is given as an explicit executable plus argument list (no shell
     parsing), so paths with spaces or backslashes work identically on Windows.
     """
-    import shutil
     import subprocess
+    import tempfile
 
     from . import objects as objects_mod
+    from .publication import publish_directory
+    from .construction import atomic_json
 
     run_dir = _run_dir(args)
     sidecar = args.sidecar or os.environ.get("VITRINE_OBJECT_SIDECAR")
@@ -343,22 +354,35 @@ def cmd_objects(args: argparse.Namespace) -> int:
     # guarantees no stale files survive from a prior run and that a failed or
     # invalid invocation never replaces good existing output.
     out_dir = run_dir / "objects"
-    staging = run_dir / ".objects.staging"
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
+    staging = Path(tempfile.mkdtemp(prefix=".objects.staging-", dir=run_dir))
 
-    command = [sidecar, *(args.sidecar_arg or []), "--package", str(run_dir), "--out", str(staging)]
+    extra = args.sidecar_arg
+    if extra is None:
+        extra = json.loads(os.environ.get("VITRINE_OBJECT_SIDECAR_ARGS_JSON", "[]"))
+    if not isinstance(extra, list) or not all(isinstance(arg, str) for arg in extra):
+        raise ValueError("Sidecar arguments must be a JSON string array")
+    command = [sidecar, *extra, "--package", str(run_dir), "--out", str(staging)]
     logger.info("objects: launching %r with %d arg(s)", sidecar, len(command) - 1)
+    import time
+    started = time.time()
     try:
-        result = subprocess.run(command)
+        with (staging / "sidecar.log").open("w", encoding="utf-8") as log:
+            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
+                                    timeout=getattr(args, "timeout", 1800))
+        atomic_json(staging / "worker.json", {"returncode": result.returncode,
+                    "elapsed_seconds": time.time() - started, "log": "sidecar.log"})
+    except subprocess.TimeoutExpired as exc:
+        atomic_json(staging / "failure.json", {"state": "timeout", "message": str(exc),
+                    "elapsed_seconds": time.time() - started, "log": "sidecar.log"})
+        logger.error("Sidecar timed out; evidence retained in %s", staging)
+        return _OBJECTS_SIDECAR_FAILED
     except OSError as exc:
         logger.error("could not launch sidecar %r: %s", sidecar, exc)
-        shutil.rmtree(staging, ignore_errors=True)
+        atomic_json(staging / "failure.json", {"state": "failed", "message": str(exc)})
         return _OBJECTS_LAUNCH_FAILED
     if result.returncode != 0:
         logger.error("sidecar exited with status %d", result.returncode)
-        shutil.rmtree(staging, ignore_errors=True)
+        atomic_json(staging / "failure.json", {"state": "failed", "returncode": result.returncode})
         return _OBJECTS_SIDECAR_FAILED
 
     # Exit zero is not enough: require a valid contract document before trusting
@@ -367,12 +391,10 @@ def cmd_objects(args: argparse.Namespace) -> int:
         records = objects_mod.load_validated_objects(staging)
     except objects_mod.ObjectManifestError as exc:
         logger.error("sidecar finished but its output is invalid: %s", exc)
-        shutil.rmtree(staging, ignore_errors=True)
+        atomic_json(staging / "failure.json", {"state": "invalid", "message": str(exc)})
         return _OBJECTS_INVALID_OUTPUT
 
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
-    os.replace(staging, out_dir)
+    publish_directory(staging, out_dir)
 
     labels = ", ".join(rec["label"] for rec in records) or "none"
     print(f"\nobjects: {len(records)} recovered — {labels}")
@@ -432,10 +454,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         record = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else {}
         record["capture_type"] = args.capture_type
         atomic_json(record_path, record)
-    stages = [("ingest", cmd_ingest), ("sfm", cmd_sfm), ("train", cmd_train), ("evaluate", cmd_evaluate)]
+    if list(args.originals) == ["source"] and args.source != "source":
+        args.originals = [args.source]
+    stages = [("ingest", cmd_ingest), ("sfm", cmd_sfm), ("train", cmd_train),
+              ("export", cmd_export), ("evaluate", cmd_evaluate)]
     if getattr(args, "cleanup", False):
         stages.append(("cleanup", cmd_cleanup))
-    stages += [("export", cmd_export), ("package", cmd_package)]
+    stages += [("package", cmd_package)]
     return run_pipeline(args, stages)
 
 
@@ -466,10 +491,12 @@ def cmd_ui(args: argparse.Namespace) -> int:
         return run_desktop(port=args.port, only=args.only)
 
     only = getattr(args, "only", None) or None
+    runs_root = Path(args.runs_root).expanduser() if getattr(args, "runs_root", None) else None
     serve(
         host=args.host,
         port=args.port,
         open_browser=args.open,
+        runs_root=runs_root,
         only=only,
     )
     return 0
@@ -508,6 +535,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui.add_argument("--port", type=int, default=8765)
     p_ui.add_argument("--desktop", action="store_true", help="open the Windows desktop app")
     p_ui.add_argument("--open", action="store_true", help="open the browser")
+    p_ui.add_argument(
+        "--runs-root",
+        default=None,
+        help="external directory containing capture run folders (defaults to <project>/runs)",
+    )
     p_ui.add_argument(
         "--only",
         action="append",
@@ -554,12 +586,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_package.set_defaults(func=cmd_package)
 
     p_object_meshes = sub.add_parser("object-meshes", help="experimental separated splat to coloured mesh conversion")
+    p_object_meshes.add_argument("--object-id", default=None, help="reconstruct only this exact object ID")
     p_object_meshes.add_argument("--mesh-max-views", type=int, default=120)
     p_object_meshes.add_argument("--mesh-long-edge", type=int, default=1200)
     p_object_meshes.add_argument("--poisson-depth", type=int, default=10)
     p_object_meshes.set_defaults(func=cmd_object_meshes)
 
     p_objects = sub.add_parser("objects", help="run the external object-reconstruction sidecar")
+    p_objects.add_argument("--timeout", type=int, default=1800, help="sidecar timeout in seconds")
     p_objects.add_argument("--sidecar", default=None,
                            help="sidecar executable (else $VITRINE_OBJECT_SIDECAR)")
     p_objects.add_argument("--sidecar-arg", action="append", default=None, metavar="ARG",

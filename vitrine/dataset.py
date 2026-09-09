@@ -46,6 +46,8 @@ def _locate_image(root: Path, name: str) -> Path | None:
     if direct.is_file():
         return direct
     matches = list(root.rglob(Path(name).name))
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous registered image {name!r}: multiple basename matches")
     return matches[0] if matches else None
 
 
@@ -167,6 +169,9 @@ class View:
     #: [3, 3] intrinsics matching ``image``'s resolution.
     intrinsics: torch.Tensor
     camera_id: int
+    image_id: int | None = None
+    rectification_input_size: tuple[int, int] | None = None
+    rectification_input_intrinsics: torch.Tensor | None = None
 
     @property
     def height(self) -> int:
@@ -248,6 +253,8 @@ class ViewSet:
                 continue
 
             camera = model.camera_for(image_meta)
+            if undistort and camera.model not in undistort_module._SUPPORTED:
+                raise ValueError(f"Unsupported camera model {camera.model} for image {image_meta.id}")
             with Image.open(path) as handle:
                 pil = handle.convert("RGB")
                 # COLMAP's stored size is authoritative for the intrinsics; if
@@ -266,6 +273,7 @@ class ViewSet:
 
             k = torch.from_numpy(camera.scaled_intrinsics(target_w, target_h))
             tensor = torch.from_numpy(array)
+            rectification_input_intrinsics = k.clone()
 
             # The rasteriser is a pinhole projector; COLMAP solved a distorted
             # camera. Reconcile them here, once, rather than asking the
@@ -286,6 +294,9 @@ class ViewSet:
                     world_to_camera=torch.from_numpy(image_meta.world_to_camera()),
                     intrinsics=k,
                     camera_id=image_meta.camera_id,
+                    image_id=image_meta.id,
+                    rectification_input_size=(target_w, target_h),
+                    rectification_input_intrinsics=rectification_input_intrinsics,
                 )
             )
             if len(self.views) % 25 == 0 or len(self.views) == len(model.images):

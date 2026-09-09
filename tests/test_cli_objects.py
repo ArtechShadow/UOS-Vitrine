@@ -62,7 +62,8 @@ def test_success_invokes_subprocess_and_validates_output(tmp_path, monkeypatch):
     command = run.call_args.args[0]
     assert command[:3] == ["python", "-m", "sidecar"]
     assert "--package" in command and str(tmp_path) in command
-    assert "--out" in command and str(tmp_path / ".objects.staging") in command
+    assert "--out" in command
+    assert Path(command[command.index("--out") + 1]).name.startswith(".objects.staging-")
     # published atomically to objects/, staging cleaned up
     assert (tmp_path / "objects" / "objects.json").is_file()
     assert not (tmp_path / ".objects.staging").exists()
@@ -78,6 +79,7 @@ def test_publish_replaces_stale_prior_output(tmp_path, monkeypatch):
     # stale file from the prior invocation is gone after atomic publish
     assert not (tmp_path / "objects" / "stale.txt").exists()
     assert (tmp_path / "objects" / "obj_001" / "mesh.glb").is_file()
+    assert [p.read_text() for p in (tmp_path / "objects-history").glob("*/stale.txt")] == ["old"]
 
 
 def test_windows_style_path_with_spaces_is_one_arg(tmp_path, monkeypatch):
@@ -104,9 +106,9 @@ def test_invalid_output_leaves_prior_output_intact(tmp_path, monkeypatch):
     # sidecar exits 0 but writes nothing valid into staging -> invalid -> exit 3
     with mock.patch("subprocess.run", return_value=SimpleNamespace(returncode=0)):
         assert cmd_objects(_args(tmp_path, sidecar="quiet")) == 3
-    # the good prior output is untouched, staging cleaned up
+    # the good prior output and failed evidence are retained
     assert (good / "keep.txt").read_text() == "prior"
-    assert not (tmp_path / ".objects.staging").exists()
+    assert len(list(tmp_path.glob(".objects.staging-*/failure.json"))) == 1
 
 
 def test_zero_exit_with_invalid_output_is_failure(tmp_path, monkeypatch):
@@ -126,3 +128,16 @@ def test_missing_sidecar_binary_is_reported(tmp_path, monkeypatch):
     monkeypatch.delenv("VITRINE_OBJECT_SIDECAR", raising=False)
     with mock.patch("subprocess.run", side_effect=OSError("no such file")):
         assert cmd_objects(_args(tmp_path, sidecar="nope")) == 4
+
+
+def test_timeout_retains_log_and_prior_output(tmp_path, monkeypatch):
+    import subprocess
+    monkeypatch.delenv('VITRINE_OBJECT_SIDECAR', raising=False)
+    (tmp_path/'objects').mkdir()
+    (tmp_path/'objects'/'keep').write_bytes(b'previous')
+    with mock.patch('subprocess.run', side_effect=subprocess.TimeoutExpired(['fixture'], 1)):
+        assert cmd_objects(_args(tmp_path, sidecar='fixture')) == 5
+    assert (tmp_path/'objects'/'keep').read_bytes() == b'previous'
+    failure = json.loads(next(tmp_path.glob('.objects.staging-*/failure.json')).read_text())
+    assert failure['state'] == 'timeout'
+    assert next(tmp_path.glob('.objects.staging-*/sidecar.log')).is_file()
