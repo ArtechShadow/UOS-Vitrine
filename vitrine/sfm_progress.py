@@ -45,13 +45,16 @@ def observe_line(progress, line):
     extracted = re.search(r"Processed file \[(\d+)/(\d+)\]", line)
     if extracted:
         values.update(count=int(extracted[1]), total=int(extracted[2]), unit="images")
+    sequential = re.search(r"Processing image \[(\d+)/(\d+)\]", line)
+    if sequential:
+        values.update(count=int(sequential[1]), total=int(sequential[2]), unit="video frames")
     matching = re.search(r"(?:Matching|Processing) block \[(\d+)/(\d+),\s*(\d+)/(\d+)\]", line)
     if matching:
         values.update(count=(int(matching[1])-1)*int(matching[4])+int(matching[3]),
                       total=int(matching[2])*int(matching[4]), unit="blocks")
     now = time.monotonic()
     # Keep draining the pipe even when COLMAP logs faster than the UI polls.
-    if extracted or matching or now - getattr(progress, "last_line", 0) >= 1:
+    if extracted or sequential or matching or now - getattr(progress, "last_line", 0) >= 1:
         progress.update(**values)
         progress.last_line = now
 
@@ -70,6 +73,8 @@ class MapperSnapshots:
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self._watch, daemon=True)
         self.seen = set()
+        self.primary_registered = 0
+        self.primary_points = 0
 
     def start(self):
         self.thread.start()
@@ -102,10 +107,16 @@ class MapperSnapshots:
             model = read_model(text_dir)
             if not model.images or not len(model.points_xyz):
                 raise ValueError("Snapshot has no registered geometry yet")
-            payload = sparse_payload(model)
-            SnapshotStore(self.work).publish("sparse", ".json", lambda p: atomic_json(p, payload),
-                                             registered=len(model.images), points=len(model.points_xyz))
-            self.progress.update(registered=len(model.images), points=len(model.points_xyz), preview_error=None)
+            # A subsequent small disconnected component must not replace the
+            # room in the live viewer while multiple-model search continues.
+            if len(model.images) >= self.primary_registered:
+                payload = sparse_payload(model)
+                SnapshotStore(self.work).publish("sparse", ".json", lambda p: atomic_json(p, payload),
+                                                 registered=len(model.images), points=len(model.points_xyz))
+                self.primary_registered = len(model.images)
+                self.primary_points = len(model.points_xyz)
+            self.progress.update(registered=self.primary_registered, points=self.primary_points,
+                                 candidate_registered=len(model.images), preview_error=None)
             self.seen.update(p.name for p in pending)
             # These are exclusively generated preview intermediates, all closed.
             # Validate the resolved parent before any recursive removal.

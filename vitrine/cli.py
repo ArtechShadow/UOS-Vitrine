@@ -183,6 +183,11 @@ def cmd_train(args: argparse.Namespace) -> int:
         profile = replace(profile, iterations=args.iterations)
 
     model = read_model(run_dir / "sfm" / "sparse_text")
+    from .sfm import validate_registration
+    image_root = run_dir / "ingest" / "images"
+    total_images = sum(1 for p in image_root.rglob("*")
+                       if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
+    validate_registration(len(model.images), total_images)
     report = get_engine().train(
         model,
         run_dir / "ingest" / "images",
@@ -243,7 +248,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     model = read_model(run_dir / "sfm" / "sparse_text")
     views = ViewSet(model, run_dir / "ingest" / "images", long_edge=profile.source_long_edge)
 
-    ply = Path(args.ply) if args.ply else run_dir / "model" / "scene.ply"
+    ply = Path(args.ply) if getattr(args, "ply", None) else run_dir / "model" / "scene.ply"
     from .construction import Progress
     from .evaluation_preview import EvaluationPreview
     with Progress(run_dir / "model", "evaluate") as observer:
@@ -264,6 +269,9 @@ def cmd_package(args: argparse.Namespace) -> int:
 
     train_report = load(run_dir / "model" / "train.json")
     profile = profiles.resolve(args.quality, args.tier)
+    if getattr(args, "iterations", None):
+        from dataclasses import replace
+        profile = replace(profile, iterations=args.iterations, measured_runtime_minutes=None)
 
     session_path = run_dir / "capture-session.json"
     result = build_package(
@@ -297,7 +305,8 @@ _OBJECTS_SIDECAR_FAILED = 5
 
 def cmd_object_meshes(args):
     from .object_mesh import build_object_meshes
-    build_object_meshes(_run_dir(args))
+    build_object_meshes(_run_dir(args), max_views=args.mesh_max_views,
+                        long_edge=args.mesh_long_edge, poisson_depth=args.poisson_depth)
     return 0
 
 
@@ -423,7 +432,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         record = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else {}
         record["capture_type"] = args.capture_type
         atomic_json(record_path, record)
-    stages = [("ingest", cmd_ingest), ("sfm", cmd_sfm), ("train", cmd_train)]
+    stages = [("ingest", cmd_ingest), ("sfm", cmd_sfm), ("train", cmd_train), ("evaluate", cmd_evaluate)]
     if getattr(args, "cleanup", False):
         stages.append(("cleanup", cmd_cleanup))
     stages += [("export", cmd_export), ("package", cmd_package)]
@@ -545,6 +554,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_package.set_defaults(func=cmd_package)
 
     p_object_meshes = sub.add_parser("object-meshes", help="experimental separated splat to coloured mesh conversion")
+    p_object_meshes.add_argument("--mesh-max-views", type=int, default=120)
+    p_object_meshes.add_argument("--mesh-long-edge", type=int, default=1200)
+    p_object_meshes.add_argument("--poisson-depth", type=int, default=10)
     p_object_meshes.set_defaults(func=cmd_object_meshes)
 
     p_objects = sub.add_parser("objects", help="run the external object-reconstruction sidecar")
@@ -562,7 +574,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("package")
     p_verify.set_defaults(func=cmd_verify)
 
-    p_run = sub.add_parser("run", help="ingest + sfm + train + package")
+    p_run = sub.add_parser("run", help="ingest + sfm + train + evaluate + export + package")
     p_run.add_argument("--source", default="source")
     p_run.add_argument(
         "--session",

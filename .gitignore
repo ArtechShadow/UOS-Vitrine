@@ -6,6 +6,7 @@ runs/
 __pycache__/
 *.py[cod]
 .venv/
+.pytest_cache/
 *.egg-info/
 
 # Raw capture data and reference benchmarks — personal/institutional
@@ -41,3 +42,6 @@ docs/ops-parallel-work.md
 docs/*.pptx
 docs/*.docx
 docs/academic-report.md
+
+# Local XR Lab rehearsal screenshots, capture evidence and draft report.
+report/xr-lab-20260909-rehearsal/

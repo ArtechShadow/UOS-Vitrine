@@ -13,3 +13,9 @@ bundled as browser ESM with esbuild 0.25.9. Supporting packages and licences
 are recorded in `SPACEMOUSE-LICENSES.txt`. Source: https://github.com/nytamin/spacemouse.
 This is an independent WebHID integration, not 3Dconnexion certification or
 the proprietary 3DxWare SDK. No runtime CDN or driver-server connection is used.
+# Surface inspection additions
+
+`loaders/GLTFLoader.js`, `utils/BufferGeometryUtils.js`, and
+`environments/RoomEnvironment.js` are unmodified Three.js r160 modules from
+https://github.com/mrdoob/three.js/tree/r160/examples/jsm, matching the bundled
+renderer. They share `three-LICENSE.txt` (MIT) and load locally without a CDN.

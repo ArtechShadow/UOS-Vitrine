@@ -328,30 +328,23 @@ def _run_sfm(
             "--database_path", "/work/database.db",
             "--image_path", "/images",
             "--output_path", "/work/sparse",
-            "--Mapper.multiple_models", "0",
+            "--Mapper.multiple_models", "1",
+            "--Mapper.max_num_models", "10",
             "--Mapper.num_threads", workers,
         ],
         mounts=mounts, image=image, use_gpu=False, timeout=14400, log_path=log_path,
     )
 
-    model_dir = sparse_root / "0"
-    if not model_dir.is_dir():
-        candidates = sorted(p for p in sparse_root.iterdir() if p.is_dir())
-        if not candidates:
-            raise ColmapError(
-                "COLMAP mapper produced no model. Usual causes: too little overlap "
-                "between views, motion blur, or largely textureless surfaces. "
-                f"See {log_path}."
-            )
-        candidates[0].rename(model_dir)
+    model_dir = select_largest_model(sparse_root)
+    container_model = "/work/sparse/" + model_dir.name
 
     # The mapper holds the principal point fixed. Refining it in a second pass
     # is cheap and measurably improves reprojection on phone cameras.
     run_command(
         [
             "bundle_adjuster",
-            "--input_path", "/work/sparse/0",
-            "--output_path", "/work/sparse/0",
+            "--input_path", container_model,
+            "--output_path", container_model,
             "--BundleAdjustment.refine_principal_point", "1",
         ],
         mounts=mounts, image=image, use_gpu=False, timeout=7200, log_path=log_path,
@@ -365,7 +358,7 @@ def _run_sfm(
     run_command(
         [
             "model_converter",
-            "--input_path", "/work/sparse/0",
+            "--input_path", container_model,
             "--output_path", "/work/sparse_text",
             "--output_type", "TXT",
         ],
@@ -390,11 +383,6 @@ def _run_sfm(
         "SfM complete: %d/%d images registered, %d camera model(s), %d points",
         registered, n_images, cameras, points,
     )
-    if registered < n_images * 0.6:
-        logger.warning(
-            "only %d of %d images registered (%.0f%%) — check coverage overlap and blur",
-            registered, n_images, registered / n_images * 100,
-        )
     if cameras < len(groups):
         logger.warning(
             "expected %d camera models (one per group) but got %d — "
@@ -412,4 +400,36 @@ def _run_sfm(
         used_gpu=use_gpu,
     )
     (work_dir / "sfm.json").write_text(json.dumps(result.describe(), indent=2), encoding="utf-8")
+    validate_registration(registered, n_images)
     return result
+
+
+def validate_registration(registered: int, total: int) -> None:
+    """Reject a partial camera solve before spending time on splat training."""
+    if registered < 3 or registered < total * 0.6:
+        raise ColmapError(
+            f"Camera alignment incomplete: only {registered}/{total} images registered "
+            f"({registered / max(total, 1):.1%}). Training stopped: at least three views "
+            "and 60% camera coverage are required. Inspect the camera model, image "
+            "overlap and blur; preserve this attempt and retry alignment."
+        )
+
+
+def select_largest_model(sparse_root: Path) -> Path:
+    """COLMAP's first component may be a two-view fragment; preserve all models."""
+    import struct
+    candidates = []
+    for path in sorted(Path(sparse_root).glob('*/images.bin')):
+        with path.open('rb') as handle:
+            header = handle.read(8)
+        if len(header) == 8:
+            candidates.append((struct.unpack('<Q', header)[0], path.parent))
+    if not candidates:
+        raise ColmapError(
+            "COLMAP mapper produced no readable model. Check overlap, motion blur "
+            f"and texture in the input; see {Path(sparse_root).parent / 'colmap.log'}."
+        )
+    registered, chosen = max(candidates, key=lambda item: item[0])
+    logger.info("Selected camera component %s with %d registered images from %d models",
+                chosen.name, registered, len(candidates))
+    return chosen

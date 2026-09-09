@@ -519,12 +519,16 @@ def _train_impl(
 
     if views is None:
         from .telemetry import measure
+        observer.update(substage="preprocessing", count=0, total=len(model.images),
+                        unit="calibrated views", message="Loading and correcting lens distortion")
         with measure(output_dir, "preprocessing", input_frames=len(model.images)):
             views = ViewSet(
                 model, images_dir,
                 long_edge=profile.source_long_edge,
                 device=device,
+                on_load=lambda count,total: observer.update(count=count,total=total),
             )
+    observer.update(substage="optimising", count=None, total=profile.iterations, unit="steps")
     logger.info("view cache: %.2f GB in system RAM", views.memory_footprint_gb())
 
     from .telemetry import measure
@@ -840,6 +844,9 @@ def _train_impl(
                 _write(params, output_dir / f"checkpoint_{step}.ply", profile.sh_degree, scene_scale)
 
     minutes = (time.time() - started) / 60.0
+    # Retain the completed model before final evaluation. Metrics can be
+    # recomputed from a saved file if the process is interrupted afterwards.
+    ply_path = _write(params, output_dir / "scene.ply", profile.sh_degree, scene_scale)
     observer.preview.capture(params, profile.iterations, force=True)
     observer.update(stage="evaluate", step=profile.iterations, total=profile.iterations,
                     message="Measuring reconstruction quality")
@@ -900,8 +907,6 @@ def _train_impl(
         "alive Gaussians at finish: %.1f%%, median live anisotropy %.1f",
         alive_fraction * 100, live_anisotropy_median,
     )
-
-    ply_path = _write(params, output_dir / "scene.ply", profile.sh_degree, scene_scale)
 
     rate = electricity_rate_gbp_per_kwh()
     logger.info("energy: %.3f kWh (~£%.2f at £%.4f/kWh)", energy_kwh, energy_kwh * rate, rate)

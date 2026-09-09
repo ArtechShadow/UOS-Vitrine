@@ -147,7 +147,7 @@ const ARTEFACT = {
 
 const QUALITY_BLURB = {
   draft: "A quick preview — useful while testing a capture, not for deposit.",
-  standard: "Balanced quality for everyday review and most presentations.",
+  standard: "Legacy profile. Review its crop coverage warning before a quality-critical run.",
   archive: "Experimental on workstations: validate crop coverage and reconstruction quality before use. Archive packaging is available independently of build quality.",
 };
 
@@ -1972,7 +1972,7 @@ function renderProfiles() {
     byQuality[q].push(p);
   }
 
-  const qualityOrder = ["draft", "standard", "archive"].filter((q) => byQuality[q]);
+  const qualityOrder = ["demo", "draft", "standard", "archive"].filter((q) => byQuality[q]);
   for (const q of Object.keys(byQuality)) {
     if (!qualityOrder.includes(q)) qualityOrder.push(q);
   }
@@ -1980,7 +1980,7 @@ function renderProfiles() {
   const cards = qualityOrder
     .map((q) => {
       const match = byQuality[q].find((p) => p.tier === detected) || byQuality[q][0];
-      const isRec = match.tier === detected && q === "standard";
+      const isRec = match.tier === detected && q === "demo";
       const title = q.charAt(0).toUpperCase() + q.slice(1);
       return `
         <article class="card quality-card ${isRec ? "recommended" : ""}">
@@ -1992,6 +1992,7 @@ function renderProfiles() {
               ? `${match.name} · cap ${fmt(match.cap_max)} · crop ${fmt(match.crop)} · ~${fmt(match.estimated_minutes, 0)} min`
               : QUALITY_BLURB[q] || "Processing profile for this quality level."
           )}</p>
+          ${(match.warnings || []).map(warning => `<p class="muted">${escapeHtml(warning)}</p>`).join("")}
           <div class="quality-stats">
             <div>
               <span class="k">${adv ? "~min" : "Typical time"}</span>

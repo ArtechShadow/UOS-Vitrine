@@ -1024,7 +1024,7 @@ def _doctor_payload() -> dict[str, Any]:
             "docker_gpu": docker_gpu,
             "docker_engine": docker_engine,
         },
-        "profile_preview": profiles.describe(profiles.resolve("standard", tier)),
+        "profile_preview": profiles.describe(profiles.resolve("demo", tier)),
     }
 
 

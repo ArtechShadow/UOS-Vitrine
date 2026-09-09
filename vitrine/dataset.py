@@ -204,6 +204,7 @@ class ViewSet:
         ram_guard: bool = True,
         hardware: Mapping[str, Any] | None = None,
         runtime: Mapping[str, Any] | None = None,
+        on_load=None,
     ) -> None:
         self.device = device
         self.scene_scale = scene_scale(model)
@@ -287,6 +288,13 @@ class ViewSet:
                     camera_id=image_meta.camera_id,
                 )
             )
+            if len(self.views) % 25 == 0 or len(self.views) == len(model.images):
+                logger.info("prepared %d/%d calibrated views", len(self.views), len(model.images))
+            if on_load is not None and (len(self.views) % 5 == 0 or len(self.views) == len(model.images)):
+                try:
+                    on_load(len(self.views), len(model.images))
+                except Exception:
+                    logger.debug("View-loading observer unavailable", exc_info=True)
 
         if missing:
             logger.warning(

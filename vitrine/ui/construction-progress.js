@@ -98,7 +98,17 @@ export function paintEvidence(data, stage) {
     title.textContent = data.substage?.includes('matcher') ? 'Finding overlapping views' : data.substage === 'mapper' ? 'Recovering camera positions' : 'Detecting image features';
     const features = data.feature_preview;
     status.textContent = features ? `${features.processed} images analysed · ${features.features.toLocaleString()} features in this image${features.points.length ? ` · showing ${features.points.length} recorded feature locations` : ' · latest image reported by COLMAP'}` : 'Waiting for COLMAP to publish image features. Camera positions appear after matching.';
-    if (features?.matching && data.substage?.includes('matcher')) {
+    if (data.substage === 'sequential_matcher') {
+      const sequence = data.sequential_progress;
+      status.textContent = sequence ? `Video frame ${sequence.count} of ${sequence.total}: finding nearby overlapping views and reusing completed matches.` : 'Matching nearby video frames; completed image matches are retained.';
+      const retained = (data.selection?.records || []).filter(record => record.status === 'kept');
+      if (sequence && retained.length) {
+        const current = Math.min(sequence.count - 1, retained.length - 1);
+        for (const record of retained.slice(Math.max(0,current-1), Math.min(retained.length,current+2))) {
+          grid.append(card({...record,reason:'Retained capture frame near the current video comparison.'}));
+        }
+      }
+    } else if (features?.matching && data.substage?.includes('matcher')) {
       const match = features.matching;
       status.textContent = `Comparing image block ${match.row}, ${match.column} in a ${match.rows} × ${match.columns} grid. Each block tests groups of photographs for shared details.`;
       const matrix = el('div', null, 'matching-grid');

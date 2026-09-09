@@ -72,7 +72,7 @@ def main():
         shutil.copy2(source / name, evidence / name)
     (out / 'objects.json').write_text(json.dumps({
         'schema': 'vitrine/object/1', 'objects': records,
-        'method': 'GroundingDINO SwinT + SAM2.1 tiny + multiview Gaussian carve',
+        'method': 'Local segmentation + multiview Gaussian carve; model lineage preserved per object',
         'source_manifest_sha256': hashlib.sha256((source / 'objects.json').read_bytes()).hexdigest(),
         'note': 'Observed Gaussian candidates; source crops are evidence previews. No mesh generation.',
     }, indent=2), encoding='utf-8')

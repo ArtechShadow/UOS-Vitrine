@@ -6,7 +6,7 @@ import {paintEvidence} from './construction-progress.js';
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 if (params.has('embedded')) document.body.classList.add('construction-embedded');
-const stages = [['preflight','Check readiness'],['ingest','Prepare images'],['sfm','Find camera positions'],['train','Build splat'],['export','Prepare viewer'],['package','Package'],['viewer','Viewer']];
+const stages = [['preflight','Check readiness'],['ingest','Prepare images'],['sfm','Find camera positions'],['train','Build splat'],['evaluate','Check quality'],['export','Prepare viewer'],['package','Package'],['viewer','Viewer']];
 document.querySelector('.build-stages').innerHTML = stages.map(([id,title],i)=>`<li data-stage="${id}"><button type="button"><b>0${i+1}</b>${title}</button></li>`).join('');
 let inspectedStage = null;
 document.querySelectorAll('.build-stages [data-stage]').forEach(item => item.querySelector('button').onclick = () => {
@@ -26,6 +26,12 @@ let renderer, camera, controls, scene, splats, cloud, frustums, bounds, fitted =
 let renderFailed = false, compare = false;
 let captureUp = null, captureBack = null;
 let completedViewerUrl = null;
+let sequentialProgress = null;
+let connectionInterrupted = false;
+let userNavigated = false;
+let captureViews = [], selectedCapture = 0;
+const surfaceSection=document.createElement('section');
+surfaceSection.hidden=true;document.querySelector('.build-info').append(surfaceSection);
 const shownSnapshots = () => (data?.snapshots || []).filter(s => inspectedStage === 'sfm' ? s.kind === 'sparse' : inspectedStage === 'train' ? s.kind === 'splat' || s.kind === 'render' : true);
 
 function initRenderer() {
@@ -39,6 +45,7 @@ function initRenderer() {
     $('geometry').append(renderer.domElement);
     controls = new OrbitControls(camera,renderer.domElement);
     controls.enableDamping = true;
+    controls.addEventListener('start',()=>{userNavigated=true;});
     const resize = () => {
       const {width,height} = $('geometry').getBoundingClientRect();
       renderer.setSize(width,height); camera.aspect=width/Math.max(1,height);camera.updateProjectionMatrix();
@@ -69,28 +76,56 @@ function disposeObject(object) {
 }
 function fit(points) {
   if (!points.length) return;
-  const box = new THREE.Box3();
-  for (let i=0;i<points.length;i+=3) box.expandByPoint(new THREE.Vector3(points[i],points[i+1],points[i+2]));
+  // A few poorly triangulated distant points must not shrink the room to a dot.
+  // This changes framing only: all recorded geometry stays in the scene.
+  const axes=[[],[],[]];
+  for (let i=0;i<points.length;i+=3) for(let axis=0;axis<3;axis++) axes[axis].push(points[i+axis]);
+  axes.forEach(values=>values.sort((a,b)=>a-b));
+  const lo=axes.map(values=>values[Math.floor((values.length-1)*.01)]);
+  const hi=axes.map(values=>values[Math.ceil((values.length-1)*.99)]);
+  const box = new THREE.Box3(new THREE.Vector3(...lo),new THREE.Vector3(...hi));
   bounds=box.getBoundingSphere(new THREE.Sphere());
-  if (!fitted) reset();
+  if (!fitted || (following && !userNavigated)) reset();
 }
 function reset() {
   if (!bounds || !camera) return;
+  userNavigated=false;
   const radius=Math.max(bounds.radius,.001);
-  controls.target.copy(bounds.center);
-  const up = captureUp || new THREE.Vector3(0,-1,0);
+  const recorded = captureViews[selectedCapture];
+  const matrix = recorded?.camera_to_world;
+  const up = matrix ? new THREE.Vector3(-matrix[0][1],-matrix[1][1],-matrix[2][1]).normalize() : captureUp || new THREE.Vector3(0,-1,0);
   const back = captureBack || new THREE.Vector3(0,0,1);
   // OrbitControls caches its up-axis at construction time.
   if (camera.up.distanceToSquared(up) > 1e-8) {
     controls.dispose(); camera.up.copy(up);
     controls = new OrbitControls(camera,renderer.domElement);
     controls.enableDamping = true;
+    controls.addEventListener('start',()=>{userNavigated=true;});
     controls.target.copy(bounds.center);
   }
-  camera.position.copy(bounds.center).addScaledVector(back,2.7*radius).addScaledVector(up,.3*radius);
+  if (recorded) {
+    camera.position.set(matrix[0][3],matrix[1][3],matrix[2][3]);
+    controls.target.copy(camera.position).addScaledVector(new THREE.Vector3(matrix[0][2],matrix[1][2],matrix[2][2]),radius*.25);
+    camera.fov=THREE.MathUtils.radToDeg(2*Math.atan(recorded.height/(2*recorded.intrinsics[1][1])));
+  } else {
+    controls.target.copy(bounds.center);
+    camera.position.copy(bounds.center).addScaledVector(back,2.7*radius).addScaledVector(up,.3*radius);
+    camera.fov=50;
+  }
   camera.near=radius/10000;camera.far=radius*100;camera.updateProjectionMatrix();controls.update();fitted=true;
 }
 function makeSparse(payload) {
+  if (payload.cameras.length > captureViews.length) {
+    captureViews = [...payload.cameras].sort((a,b)=>a.name.localeCompare(b.name));
+    const selector=$('capture-view');
+    const indices=[...new Set(Array.from({length:12},(_,i)=>Math.round(i*(captureViews.length-1)/11)))];
+    selector.replaceChildren(...[-1,...indices].map(index=>{
+      const option=document.createElement('option');option.value=index;
+      option.textContent=index<0?'Outside overview':`Captured view ${index+1} · ${captureViews[index].name.split('/').at(-1)}`;
+      return option;
+    }));
+    selector.hidden=false;selector.value=String(selectedCapture);
+  }
   // COLMAP camera coordinates are right/down/forward. Negative column 1
   // therefore estimates capture-up; positions alone cannot establish gravity.
   // Freeze the first usable orientation so live snapshots never roll the view.
@@ -218,6 +253,19 @@ function paint() {
   }
   if (!data) return;
   const displayedStage = inspectedStage || data.stage;
+  surfaceSection.hidden=!data.postprocessing?.length && !data.surface_assets?.length;
+  surfaceSection.replaceChildren();
+  if(!surfaceSection.hidden){
+    const title=document.createElement('h3');title.textContent='Objects and surfaces';surfaceSection.append(title);
+    for(const item of data.postprocessing || []){
+      const line=document.createElement('p');line.textContent=`${item.message || item.stage} · ${item.state}`;surfaceSection.append(line);
+    }
+    for(const asset of data.surface_assets || []){
+      const link=document.createElement('a');link.textContent=`Inspect ${asset.label} ↗`;
+      link.href=`/static/mesh-viewer.html?run=${encodeURIComponent(run)}&asset=${encodeURIComponent(asset.path)}&label=${encodeURIComponent(asset.label)}`;
+      link.target='_blank';link.rel='noopener';link.style.display='block';link.style.marginBottom='12px';surfaceSection.append(link);
+    }
+  }
   paintEvidence(data, displayedStage);
   document.querySelectorAll('.build-stages [data-stage] button').forEach(button => button.setAttribute('aria-pressed', String(button.parentElement.dataset.stage === displayedStage)));
   const shots=shownSnapshots();
@@ -294,6 +342,7 @@ $('replay').onclick=()=>{
   playback=setInterval(()=>{if(loading)return;const shots=shownSnapshots();const index=shots.findIndex(s=>s.id===selectedId);if(index>=shots.length-1){stopReplay();paint();return;}selectedId=shots[index+1].id;paint();},1500);
 };
 $('reset').onclick=reset;
+$('capture-view').onchange=()=>{selectedCapture=Number($('capture-view').value);showComparison(false);reset();};
 $('cameras').onclick=()=>{const visible=$('cameras').getAttribute('aria-pressed')!=='true';$('cameras').setAttribute('aria-pressed',String(visible));if(frustums)frustums.visible=visible;};
 $('compare').onclick=()=>showComparison(!compare);
 $('fullscreen').onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await $('build-screen').requestFullscreen();}catch{$('notice').textContent='Fullscreen is unavailable in this browser.';}};
@@ -312,6 +361,15 @@ async function poll(){
     }
     if(run){
       data=await fetchJSON(`/api/runs/${encodeURIComponent(run)}/construction`+(experiment?'?experiment='+encodeURIComponent(experiment):''));
+      if (connectionInterrupted) {
+        $('notice').textContent = '';
+        connectionInterrupted = false;
+      }
+      if (data.substage === 'sequential_matcher') {
+        const match = (data.message || '').match(/Processing image \[(\d+)\/(\d+)\]/);
+        if (match) sequentialProgress = {count:Number(match[1]),total:Number(match[2])};
+        if (sequentialProgress) Object.assign(data, sequentialProgress, {unit:'video frames',sequential_progress:sequentialProgress});
+      } else sequentialProgress = null;
       if (experiment && data.state !== 'running' && !data.final_url) {
         const scenePath = `experiments/${experiment}/model/scene.splat`;
         if (!completedViewerUrl) {
@@ -332,7 +390,7 @@ async function poll(){
           for (const record of data.selection?.records || []) if (/^[0-9a-f]{32}\.jpg$/.test(record.thumbnail || '')) record.url = root + 'ingest/selection-thumbnails/' + record.thumbnail;
         }
         if (!data.packaging && data.stage === 'package') data.packaging = await readOptional('construction-package.json');
-        if (!data.feature_preview && data.stage === 'sfm') data.feature_preview = await readOptional('sfm/features-preview.json');
+        if (!('feature_preview' in data) && data.stage === 'sfm') data.feature_preview = await readOptional('sfm/features-preview.json');
         if (!data.evaluation && (data.stage === 'evaluate' || inspectedStage === 'evaluate')) {
           try {const detail = await fetchJSON(`/api/runs/${encodeURIComponent(run)}`); data.evaluation = detail.stages?.evaluate?.report;} catch {}
         }
@@ -342,7 +400,7 @@ async function poll(){
       }
       paint();
     }
-  }catch(error){$('notice').textContent='Connection interrupted. Your last preview is retained. Reconnecting…';}
+  }catch(error){connectionInterrupted=true;$('notice').textContent='Connection interrupted. Your last preview is retained. Reconnecting…';}
   setTimeout(poll,document.hidden?10000:2000);
 }
 window.addEventListener('pagehide',()=>{stopped=true;generation++;stopReplay();renderer?.setAnimationLoop(null);controls?.dispose();splats?.dispose();renderer?.dispose();});

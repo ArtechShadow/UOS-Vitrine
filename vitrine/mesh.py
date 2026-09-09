@@ -235,10 +235,11 @@ def build_mesh(
     max_views: int = 120,
     depth: int = 10,
     trim_fraction: float = 0.12,
+    max_long_edge: int = 1200,
 ) -> Path:
     """Splat to mesh, end to end."""
     if max_views < 1 or len(views) < 1:
         raise ValueError("At least one camera view is required")
     indices = np.linspace(0, len(views)-1, min(max_views, len(views)), dtype=int).tolist()
-    points, colours = splat_to_pointcloud(ply_path, views, indices=indices)
+    points, colours = splat_to_pointcloud(ply_path, views, indices=indices, max_long_edge=max_long_edge)
     return poisson_mesh(points, colours, out_path, depth=depth, keep_fraction=trim_fraction)

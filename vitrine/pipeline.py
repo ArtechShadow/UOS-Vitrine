@@ -65,6 +65,7 @@ OUTPUTS = {
     "ingest": ["ingest/ingest.json"],
     "sfm": ["sfm/sfm.json", "sfm/sparse_text/cameras.txt", "sfm/sparse_text/images.txt", "sfm/sparse_text/points3D.txt"],
     "train": ["model/train.json", "model/scene.ply"],
+    "evaluate": ["model/evaluation.json"],
     "cleanup": ["model/scene.cleaned.ply"],
     "export": ["model/scene.splat"],
     "package": ["archive/manifest.json"],
@@ -140,11 +141,15 @@ def run_pipeline(args, stages):
             atomic_json(run_dir / "runtime.json", runtime)
             state["runtime"] = runtime
             state["live_previews"] = os.environ.get("VITRINE_LIVE_PREVIEWS", "1") != "0"
-            state["profile"] = describe(resolve(args.quality, args.tier), hardware=runtime["hardware"])
+            profile = resolve(args.quality, args.tier)
+            if getattr(args, "iterations", None):
+                from dataclasses import replace
+                profile = replace(profile, iterations=args.iterations, measured_runtime_minutes=None)
+            state["profile"] = describe(profile, hardware=runtime["hardware"])
             with Progress(run_dir, "preflight"), measure(run_dir, "preflight"):
                 report = check_preflight(source if "ingest" in pending else None, run_dir,
-                                         require_gpu="train" in pending or ("sfm" in pending and args.gpu != "no"),
-                                         check_sfm="sfm" in pending, check_training="train" in pending,
+                                         require_gpu=bool({"train", "evaluate"} & pending) or ("sfm" in pending and args.gpu != "no"),
+                                         check_sfm="sfm" in pending, check_training=bool({"train", "evaluate"} & pending),
                                          check_media="ingest" in pending, sfm_gpu=args.gpu != "no")
                 atomic_json(run_dir / "preflight.json", report)
                 print(summary(report), flush=True)

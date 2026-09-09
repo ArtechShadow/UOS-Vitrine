@@ -96,7 +96,8 @@ def test_extract_default_uses_full_duration_and_adaptive_safety_rate(monkeypatch
     monkeypatch.setattr(
         ingest_module.subprocess,
         "run",
-        lambda *args, **kwargs: type("Probe", (), {"returncode": 0, "stdout": "1000"})(),
+        lambda command, **kwargs: type("Probe", (), {"returncode": 0,
+            "stdout": '{"streams": [{"color_transfer": "bt709"}]}' if "json" in command else "1000"})(),
     )
     monkeypatch.setattr(ingest_module.subprocess, "Popen", FakeProcess)
 

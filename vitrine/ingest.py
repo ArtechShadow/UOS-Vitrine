@@ -91,6 +91,7 @@ class CameraGroup:
     safety_capped: bool = False
     #: Selection mode and counters for this group, filled by ``_ingest_impl``.
     selection: dict[str, object] = field(default_factory=dict)
+    colour_processing: dict[str, object] = field(default_factory=dict)
 
     def describe(self) -> dict[str, object]:
         return {
@@ -105,6 +106,7 @@ class CameraGroup:
             "extracted_fps": self.extracted_fps,
             "safety_capped": self.safety_capped,
             "selection": self.selection,
+            "colour_processing": self.colour_processing,
         }
 
 
@@ -347,6 +349,35 @@ def _probe_video_duration(video: Path) -> float | None:
     return duration if np.isfinite(duration) and duration > 0 else None
 
 
+def video_colour_processing(video: Path) -> dict[str, object]:
+    """Record HDR conversion before frames enter the SDR image pipeline.
+
+    A fixed curve/peak keeps exposure consistent across frames. Original media
+    is untouched; this is an explicitly recorded viewing/training derivative.
+    See FFmpeg's tonemap documentation: tone mapping requires linear float RGB.
+    """
+    command = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+               "-show_entries", "stream=color_transfer,color_primaries,color_space",
+               "-of", "json", str(video)]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=True)
+        document = json.loads(result.stdout)
+        if not isinstance(document, dict):
+            raise ValueError('ffprobe did not return a video metadata object')
+        streams = document.get("streams", [])
+        metadata = streams[0] if streams else {}
+        if not isinstance(metadata, dict):
+            raise ValueError('ffprobe returned malformed stream metadata')
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
+        raise RuntimeError(f"Cannot establish video colour metadata for {video.name}: {exc}") from exc
+    hdr = metadata.get("color_transfer") in {"arib-std-b67", "smpte2084"}
+    filters = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+               "tonemap=hable:desat=0:peak=10,"
+               "zscale=t=iec61966-2-1:m=bt709:r=full,format=rgb24") if hdr else ""
+    return dict(source=metadata, hdr=hdr, method="hable-fixed-peak-10-to-srgb" if hdr else "native-sdr",
+                filter=filters, output="sRGB 8-bit RGB" if hdr else "ffmpeg native PNG")
+
+
 def extract_video_frames(
     video: Path,
     out_dir: Path,
@@ -406,10 +437,15 @@ def extract_video_frames(
         effective_fps = max(0.01, (safety_cap * 0.98) / duration)
         safety_capped = True
 
+    colour = video_colour_processing(video)
+    frame_filter = f"fps={effective_fps:g}"
+    if colour["filter"]:
+        frame_filter += "," + str(colour["filter"])
+        logger.info("HDR video: converting prepared frames to sRGB using a fixed Hable curve")
     command = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", str(video),
-        "-vf", f"fps={effective_fps:g}",
+        "-vf", frame_filter,
     ]
     # An explicit integer is the legacy reproducibility escape hatch.  The
     # adaptive/default path intentionally omits -frames:v so it cannot stop at
@@ -497,6 +533,7 @@ def extract_video_frames(
         duration_seconds=duration,
         extracted_fps=effective_fps,
         safety_capped=safety_capped,
+        colour_processing=colour,
     )
 
 

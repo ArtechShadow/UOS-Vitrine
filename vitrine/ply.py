@@ -26,7 +26,9 @@ Writing activated values yields a model that looks washed out and oversized.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+import uuid
 
 import numpy as np
 from plyfile import PlyData, PlyElement
@@ -89,10 +91,6 @@ def write_splat_ply(
                 "clamped %d/%d Gaussians to a %.4f world-unit radius (%.1f%%)",
                 clipped, count, max_scale, clipped / max(count, 1) * 100,
             )
-        scales = np.minimum(scales, ceiling)
-
-    norms = np.linalg.norm(quats, axis=1, keepdims=True)
-    quats = quats / np.clip(norms, 1e-8, None)
 
     properties: list[tuple[str, str]] = [
         ("x", "f4"), ("y", "f4"), ("z", "f4"),
@@ -104,28 +102,43 @@ def write_splat_ply(
     properties += [(f"scale_{i}", "f4") for i in range(3)]
     properties += [(f"rot_{i}", "f4") for i in range(4)]
 
-    array = np.zeros(count, dtype=properties)
-    array["x"], array["y"], array["z"] = means[:, 0], means[:, 1], means[:, 2]
-    # Normals are unused by 3DGS but the format reserves them; leaving them at
-    # zero is what every reference implementation does.
-
-    for i in range(3):
-        array[f"f_dc_{i}"] = sh0[:, 0, i]
-
-    # Channel-major, as the format requires: all red bands, then green, blue.
-    if n_rest:
-        available = min(n_rest, shN.shape[1])
-        for channel in range(3):
-            for band in range(available):
-                array[f"f_rest_{channel * n_rest + band}"] = shN[:, band, channel]
-
-    array["opacity"] = opacities
-    for i in range(3):
-        array[f"scale_{i}"] = scales[:, i]
-    for i in range(4):
-        array[f"rot_{i}"] = quats[:, i]
-
-    PlyData([PlyElement.describe(array, "vertex")]).write(str(path))
+    # Bound the additional host allocation during export. A full SH3 master
+    # formerly needed another complete structured array beside its parameters
+    # and image cache. Publish atomically so interruption cannot replace a good
+    # master with a partial PLY.
+    temporary = path.with_name(path.name + '.writing-' + uuid.uuid4().hex)
+    header = ['ply', 'format binary_little_endian 1.0', f'element vertex {count}']
+    header += [f'property float {name}' for name, _ in properties]
+    header += ['end_header', '']
+    try:
+        with temporary.open('wb') as handle:
+            handle.write('\n'.join(header).encode('ascii'))
+            for start in range(0, count, 65536):
+                end = min(count, start + 65536)
+                array = np.zeros(end-start, dtype=[(name, '<f4') for name, _ in properties])
+                for i, axis in enumerate(('x', 'y', 'z')):
+                    array[axis] = means[start:end, i]
+                    array[f'f_dc_{i}'] = sh0[start:end, 0, i]
+                for channel in range(3):
+                    for band in range(min(n_rest, shN.shape[1])):
+                        array[f'f_rest_{channel*n_rest+band}'] = shN[start:end, band, channel]
+                array['opacity'] = opacities[start:end]
+                chunk_scales = scales[start:end]
+                if max_scale is not None and max_scale > 0:
+                    chunk_scales = np.minimum(chunk_scales, ceiling)
+                chunk_quats = quats[start:end]
+                chunk_quats = chunk_quats / np.clip(np.linalg.norm(chunk_quats, axis=1, keepdims=True), 1e-8, None)
+                for i in range(3):
+                    array[f'scale_{i}'] = chunk_scales[:, i]
+                for i in range(4):
+                    array[f'rot_{i}'] = chunk_quats[:, i]
+                array.tofile(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     size_mb = path.stat().st_size / 1e6
     logger.info("wrote %s — %d Gaussians, SH degree %d, %.1f MB", path.name, count, sh_degree, size_mb)
     return path

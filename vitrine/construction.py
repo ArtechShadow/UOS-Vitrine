@@ -256,6 +256,21 @@ def construction_payload(run_dir, process=None, folder=None):
     payload.update(snapshots=snapshots, images=images, training=complete or progress,
                    preview_error=read_json(training / "construction-preview-error.json") or payload.get("preview_error"))
     payload["evaluation"] = read_json(training / "evaluation.json")
+    payload['postprocessing'] = [dict(folder=name, **status) for name in ('object-meshes','scene-mesh','pbr')
+                                 if (status := read_json(run_dir/name/'construction-status.json'))]
+    payload['surface_assets'] = []
+    pbr_manifest = read_json(run_dir/'pbr/manifest.json') or {}
+    for record in pbr_manifest.get('objects', []):
+        oid = record.get('object_id', '')
+        if not isinstance(oid, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', oid):
+            continue
+        rel = f'pbr/{oid}/model.glb'
+        if (run_dir/rel).is_file():
+            payload['surface_assets'].append(dict(label=record.get('label',oid),path=rel))
+    scene_manifest = read_json(run_dir/'scene-mesh/manifest.json') or {}
+    for name in scene_manifest.get('outputs', {}):
+        if re.fullmatch(r'[A-Za-z0-9_.-]+\.glb', name) and (run_dir/'scene-mesh'/name).is_file():
+            payload['surface_assets'].append(dict(label='XR Lab scene surface',path='scene-mesh/'+name))
     payload["evaluation_progress"] = read_json(training / "evaluation-progress.json")
     payload["packaging"] = read_json(run_dir / "construction-package.json")
     manifest = read_json(run_dir / "archive/manifest.json")

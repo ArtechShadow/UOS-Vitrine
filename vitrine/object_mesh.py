@@ -14,11 +14,48 @@ import re
 import time
 from urllib.parse import quote
 import shutil
+from contextlib import contextmanager
 
 import numpy as np
 
 from .construction import Progress, atomic_json
 from .objects import load_validated_objects, resolve_contained, sha256_file
+
+
+@contextmanager
+def _mesh_staging(root):
+    """Keep failed surfaces for diagnosis; clean successful scratch only."""
+    folder = Path(tempfile.mkdtemp(prefix='staging-', dir=root))
+    try:
+        yield folder
+    except BaseException as exc:
+        atomic_json(folder/'failure.json', dict(error=str(exc), time=time.time()))
+        raise
+    else:
+        if folder.resolve().parent != Path(root).resolve() or not folder.name.startswith('staging-'):
+            raise ValueError('Unexpected mesh scratch path')
+        # Published outputs are authoritative. A transient Windows viewer or
+        # scanner handle must not turn successful publication into failure.
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def publish_mesh_generation(output, root, manifest):
+    """Publish verified immutable files, then atomically switch the manifest."""
+    generation = manifest.get('generation', '')
+    if not re.fullmatch('[0-9a-f]{32}', str(generation)):
+        raise ValueError('Invalid mesh generation')
+    destination = Path(root)/'published'/generation
+    # Copying readable mesh files tolerates Windows handles held by native
+    # mesh libraries. Readers discover a generation only through latest.json.
+    shutil.copytree(output, destination)
+    for record in manifest['objects']:
+        for name, digest in [('file','sha256'),('glb_file','glb_sha256')]:
+            if record.get(name):
+                path = resolve_contained(record[name], name, destination.resolve())
+                if sha256_file(path) != record[digest]:
+                    raise ValueError('Mesh changed while being published')
+    atomic_json(Path(root)/'latest.json', manifest)
+    return destination
 
 
 def archive_meshes(source: Path, destination: Path):
@@ -104,7 +141,11 @@ def splat_to_ply(source: Path, target: Path):
                     shN=np.empty((len(rows), 0, 3), np.float32), sh_degree=0)
 
 
-def build_object_meshes(run_dir: Path):
+def build_object_meshes(run_dir: Path, *, max_views=120, long_edge=1200, poisson_depth=10):
+    if not (isinstance(max_views, int) and max_views > 0 and
+            isinstance(long_edge, int) and 64 <= long_edge <= 4096 and
+            isinstance(poisson_depth, int) and 5 <= poisson_depth <= 12):
+        raise ValueError('Mesh settings require positive views, 64-4096px images and Poisson depth 5-12')
     from .colmap_io import read_model
     from .dataset import ViewSet
     from .mesh import build_mesh
@@ -137,7 +178,7 @@ def build_object_meshes(run_dir: Path):
                     raise ValueError('Meshing requires splats in original reconstruction coordinates; transformed assets are unsupported')
             model = read_model(run_dir / 'sfm' / 'sparse_text')
             progress.update(message='Loading registered camera views')
-            views = ViewSet(model, run_dir / 'ingest' / 'images', long_edge=1200)
+            views = ViewSet(model, run_dir / 'ingest' / 'images', long_edge=long_edge)
             if not len(views):
                 raise ValueError('No registered source views are available')
             generation = uuid.uuid4().hex
@@ -146,7 +187,7 @@ def build_object_meshes(run_dir: Path):
                 raise ValueError('Refusing symlinked mesh publication directory')
             published.mkdir(exist_ok=True)
             results = []
-            with tempfile.TemporaryDirectory(prefix='staging-', dir=root) as scratch:
+            with _mesh_staging(root) as scratch:
                 folder = Path(scratch)
                 output = folder / 'result'
                 output.mkdir()
@@ -157,32 +198,51 @@ def build_object_meshes(run_dir: Path):
                     if sha256_file(input_copy) != rec['sha256']:
                         raise ValueError('Object changed during meshing; retry after separation finishes')
                     ply = folder / 'input.ply'
-                    splat_to_ply(input_copy, ply)
+                    # The installed sidecar preserves a full-SH observed PLY.
+                    # Use it only with its recorded source-asset checksum;
+                    # otherwise the validated viewing derivative remains valid.
+                    full_sh = source.with_suffix('.ply')
+                    expected = rec.get('provenance', {}).get('source_asset', {}).get('sha256')
+                    full_sh_hash = None
+                    if full_sh.is_file() and not full_sh.is_symlink() and expected:
+                        if sha256_file(full_sh) != expected:
+                            raise ValueError('Preserved object PLY checksum mismatch')
+                        shutil.copy2(full_sh, ply)
+                        full_sh_hash = expected
+                    else:
+                        splat_to_ply(input_copy, ply)
                     mesh = output / f'object-{index:04d}.ply'
                     progress.update(message=f"Reconstructing surface: {rec['label']}", count=index, total=len(records))
-                    build_mesh(ply, views, mesh, trim_fraction=0)
-                    data = PlyData.read(mesh)
+                    build_mesh(ply, views, mesh, trim_fraction=0, max_views=max_views,
+                               max_long_edge=long_edge, depth=poisson_depth)
+                    # Memory-mapped PLYs keep a file handle open on Windows,
+                    # preventing the complete output directory from being renamed.
+                    data = PlyData.read(mesh, mmap=False)
                     vertices = np.column_stack([data['vertex'][axis] for axis in ('x','y','z')])
                     faces = data['face']['vertex_indices']
                     if not len(vertices) or not len(faces) or not np.isfinite(vertices).all():
                         raise ValueError('Mesher produced an empty or invalid surface')
-                    for face in faces:
-                        if len(face) != 3 or np.any(face < 0) or np.any(face >= len(vertices)):
+                    for start in range(0, len(faces), 65536):
+                        batch = faces[start:start+65536]
+                        if any(len(face) != 3 for face in batch):
+                            raise ValueError('Mesher produced invalid triangle indices')
+                        indices = np.stack(batch)
+                        if np.any(indices < 0) or np.any(indices >= len(vertices)):
                             raise ValueError('Mesher produced invalid triangle indices')
                     from .mesh_glb import write_mesh_glb
                     glb = write_mesh_glb(mesh, mesh.with_suffix('.glb'))
                     results.append(dict(object_id=rec['object_id'], label=rec['label'],
                                         source_sha256=rec['sha256'], file=mesh.name,
+                                        source_ply_sha256=full_sh_hash,
                                         sha256=sha256_file(mesh), vertices=len(vertices), faces=len(faces),
                                         glb_file=glb.name, glb_sha256=sha256_file(glb)))
                 manifest = dict(schema='vitrine/object-mesh/1', generation=generation,
                                 method='expected-depth-screened-poisson', experimental=True,
-                                parameters=dict(max_views=120, long_edge=1200, poisson_depth=10, trim_fraction=0),
+                                parameters=dict(max_views=max_views, long_edge=long_edge, poisson_depth=poisson_depth, trim_fraction=0),
                                 cameras_sha256=sha256_file(run_dir / 'sfm' / 'sparse_text' / 'cameras.txt'),
                                 images_sha256=sha256_file(run_dir / 'sfm' / 'sparse_text' / 'images.txt'),
-                                appearance='vertex-colour from SH0 splat', objects=results)
+                                appearance='vertex-colour from verified full-SH PLY where available; SH0 fallback recorded per object', objects=results)
                 atomic_json(output / 'manifest.json', manifest)
-                os.replace(output, published / generation)
-                atomic_json(root / 'latest.json', manifest)
+                publish_mesh_generation(output, root, manifest)
             progress.update(message='Mesh derivatives ready', count=len(records), total=len(records))
     return results

@@ -193,6 +193,12 @@ def load_validated_objects(objects_dir: Path) -> list[dict[str, Any]]:
             out["coverage"] = _validate_unit(rec["coverage"], f"objects[{i}].coverage")
         if "confidence" in rec:
             out["confidence"] = _validate_unit(rec["confidence"], f"objects[{i}].confidence")
+        if "provenance" in rec:
+            if not isinstance(rec["provenance"], dict):
+                raise ObjectManifestError(f"objects[{i}].provenance must be an object")
+            # Descriptive lineage only. Asset consumers must still verify each
+            # referenced file and digest independently before using it.
+            out["provenance"] = rec["provenance"]
         projected.append(out)
     return projected
 
