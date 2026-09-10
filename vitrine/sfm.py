@@ -143,7 +143,8 @@ def _run(
     with (nullcontext(progress) if progress else Progress(work, "sfm")) as progress:
         progress.update(substage=args[0], message="Starting " + args[0],
                         count=None, total=None, unit=None,
-                        preview_error="This COLMAP version does not expose mapper snapshots" if mapper and not options else None)
+                        preview_error=("Live geometry previews are disabled for this run" if os.environ.get("VITRINE_LIVE_PREVIEWS", "1") == "0"
+                                       else "COLMAP mapper snapshot discovery failed or snapshots are unsupported") if mapper and not options else None)
         monitor = MapperSnapshots(work, image, progress) if options else None
         tail = deque(maxlen=15)
         result = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

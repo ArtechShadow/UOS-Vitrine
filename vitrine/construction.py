@@ -163,21 +163,8 @@ def atomic_json(path, value):
 
 def process_alive(pid):
     """Return whether a process id is currently alive when the OS can tell us."""
-    if not isinstance(pid, int) or pid <= 0:
-        return None
-    if pid == os.getpid():
-        return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # The process exists but belongs to another user.  Do not turn that
-        # into an ``unknown`` status while a legitimate worker is running.
-        return True
-    except OSError:
-        return False
-    return True
+    from .processes import process_alive as check_alive
+    return check_alive(pid)
 
 
 def recover_stale_progress(folder, *, stale_after=DEFAULT_STALE_SECONDS, now=None):
@@ -441,8 +428,12 @@ def construction_payload(run_dir, process=None, folder=None):
         latest = candidate if candidate and candidate.get("started", 0) >= pipeline.get("started", 0) else pipeline
     payload = dict(latest)
     if folder is None:
-        from .sfm_visual import feature_preview
+        from .sfm_visual import feature_preview, matching_preview, mapper_preview
         payload["feature_preview"] = feature_preview(run_dir)
+        if latest.get('stage') == 'sfm':
+            payload['matching_preview'] = matching_preview(run_dir)
+            if latest.get('substage') == 'mapper':
+                payload['mapper_preview'] = mapper_preview(run_dir)
     selection = read_json(run_dir / "ingest/selection.json") if folder is None else None
     if selection:
         for record in selection.get("records", []):

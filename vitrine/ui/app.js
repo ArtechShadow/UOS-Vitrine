@@ -1299,7 +1299,7 @@ function objectSeparationHtml(run, adv) {
         ${observedCandidate && !meshLink ? `<button type="button" class="soft" data-object-mesh="${escapeHtml(item.object_id || "")}" ${meshOutputs.status?.state === "running" ? "disabled" : ""}>Reconstruct surface</button>` : ""}
         ${meshLink}
       </div>
-    </article>`).join("");
+    </article>`;
   }).join("");
   const sidecarReady = flow.configured && flow.executable_available !== false && !flow.configuration_error;
   const status = flow.running ? "Separating objects…" : outputs

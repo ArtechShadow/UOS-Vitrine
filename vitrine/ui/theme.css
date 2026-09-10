@@ -123,10 +123,16 @@ body.construction-embedded{padding:16px}.construction-embedded .build-header{dis
 .evidence-card-copy strong { font-size:12px; }.evidence-card-copy p { margin:6px 0; }.evidence-card-copy small { color:var(--muted); }
 .evidence-card.kept { border-color:var(--green); }.evidence-card.kept strong { color:var(--green); }
 .evidence-card.rejected { border-color:var(--red); }.evidence-card.rejected strong { color:var(--red); }
+.evidence-card.is-current { border:2px solid var(--accent, #d78b3d); box-shadow:0 0 0 2px var(--accent, #d78b3d); }
+.evidence-current-label { padding:7px 10px; background:var(--accent, #d78b3d); color:var(--bg, #171719); font-size:11px; font-weight:700; }
 .evidence-empty { grid-column:1/-1; color:var(--muted); font-size:13px; }
 .process-evidence footer { display:flex; align-items:center; justify-content:space-between; gap:10px; padding-top:12px; font-size:11px; color:var(--muted); }
 .evidence-stat { padding:20px; border:1px solid var(--border); border-radius:10px; }.evidence-stat strong { font-size:26px; }.evidence-stat p { font-size:12px; color:var(--muted); }
 .feature-evidence { grid-column:1/-1; min-width:0; }.feature-evidence svg { display:block; width:100%; max-height:46vh; background:var(--canvas); border-radius:8px; }.feature-evidence p { font-size:11px; color:var(--muted); overflow-wrap:anywhere; }
+.mapper-evidence > img { display:block; width:100%; max-height:34vh; object-fit:contain; border-radius:8px; background:var(--canvas); }
+.mapper-steps { display:flex; gap:8px; flex-wrap:wrap; margin:16px 0; }
+.mapper-steps span { padding:10px; border:1px solid var(--border); border-radius:8px; font-size:12px; }
+.mapper-steps .is-current { border-color:var(--orange); color:var(--orange); background:var(--orange-dim); }
 .matching-grid { display:grid; gap:8px; grid-column:1/-1; }.matching-grid > div { border:1px solid var(--border); border-radius:7px; text-align:center; padding:10px; font-size:12px; color:var(--muted); }.matching-grid .is-current { background:var(--orange-dim); border-color:var(--orange); color:var(--orange); }
 @media(max-width:600px) { .process-evidence { padding:12px; }.evidence-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.evidence-card img { height:90px; } }
 

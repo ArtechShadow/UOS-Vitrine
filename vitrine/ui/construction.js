@@ -25,11 +25,13 @@ let data = null, loadedId = null, loading = false, playback = null, generation =
 let renderer, camera, controls, scene, splats, cloud, frustums, bounds, fitted = false, splatCount = 0;
 let renderFailed = false, compare = false;
 let captureUp = null, captureBack = null;
+let groundUp = null, orientationLoadedFor = null;
 let completedViewerUrl = null;
 let sequentialProgress = null;
 let connectionInterrupted = false;
 let userNavigated = false;
-let captureViews = [], selectedCapture = 0;
+let captureViews = [], selectedCapture = -1;
+let previousCameraNames = new Set();
 const surfaceSection=document.createElement('section');
 surfaceSection.hidden=true;document.querySelector('.build-info').append(surfaceSection);
 const shownSnapshots = () => (data?.snapshots || []).filter(s => inspectedStage === 'sfm' ? s.kind === 'sparse' : inspectedStage === 'train' ? s.kind === 'splat' || s.kind === 'render' : true);
@@ -93,8 +95,11 @@ function reset() {
   const radius=Math.max(bounds.radius,.001);
   const recorded = captureViews[selectedCapture];
   const matrix = recorded?.camera_to_world;
-  const up = matrix ? new THREE.Vector3(-matrix[0][1],-matrix[1][1],-matrix[2][1]).normalize() : captureUp || new THREE.Vector3(0,-1,0);
-  const back = captureBack || new THREE.Vector3(0,0,1);
+  const up = groundUp || (matrix ? new THREE.Vector3(-matrix[0][1],-matrix[1][1],-matrix[2][1]).normalize() : captureUp || new THREE.Vector3(0,-1,0));
+  const back = (captureBack || new THREE.Vector3(0,0,1)).clone();
+  back.addScaledVector(up, -back.dot(up));
+  if (back.lengthSq() < 1e-8) back.set(1,0,0).addScaledVector(up,-up.x);
+  back.normalize();
   // OrbitControls caches its up-axis at construction time.
   if (camera.up.distanceToSquared(up) > 1e-8) {
     controls.dispose(); camera.up.copy(up);
@@ -162,8 +167,10 @@ function makeSparse(payload) {
     const lines=[];
     corners.forEach((v,i)=>{lines.push(centre,v,v,corners[(i+1)%4]);});
     const geo=new THREE.BufferGeometry().setFromPoints(lines);
-    cameraGroup.add(new THREE.LineSegments(geo,new THREE.LineBasicMaterial({color:0xf18a46})));
+    const newlyPlaced = previousCameraNames.size > 0 && !previousCameraNames.has(view.name);
+    cameraGroup.add(new THREE.LineSegments(geo,new THREE.LineBasicMaterial({color:newlyPlaced ? 0x64e6c4 : 0xf18a46})));
   }
+  previousCameraNames = new Set(payload.cameras.map(view => view.name));
   cameraGroup.visible=$('cameras').getAttribute('aria-pressed')==='true';
   return {group,cameraGroup};
 }
@@ -222,7 +229,7 @@ async function loadSnapshot(shot) {
     }
     if (ticket!==generation) return;
     loadedId=shot.id;$('build-empty').hidden=true;
-    $('preview-label').textContent=shot.kind==='sparse'?'Registered cameras · sparse geometry':'Reduced-detail splat · up to 250,000 Gaussians';
+    $('preview-label').textContent=shot.kind==='sparse'?'3D camera map · orange: placed cameras · mint: newly added':'Reduced-detail splat · up to 250,000 Gaussians';
     $('notice').textContent='';
   } catch (error) {
     $('notice').textContent='Preview could not be loaded. Keeping the previous view and retrying. '+error.message;
@@ -385,6 +392,14 @@ async function poll(){
       if (!experiment) {
         const root = `/files/${encodeURIComponent(run)}/`;
         const readOptional = async path => {try {const response=await fetch(root+path, {cache:'no-store'});return response.ok ? await response.json() : null;} catch {return null;}};
+        if (orientationLoadedFor !== run) {
+          const orientation = await readOptional('view-orientation.json');
+          const up = orientation?.up;
+          groundUp = Array.isArray(up) && up.length === 3 && up.every(Number.isFinite) && Math.hypot(...up) > .001
+            ? new THREE.Vector3(...up).normalize() : null;
+          orientationLoadedFor = run;
+          fitted = false;
+        }
         if (!data.selection) {
           data.selection = await readOptional('ingest/selection.json');
           for (const record of data.selection?.records || []) if (/^[0-9a-f]{32}\.jpg$/.test(record.thumbnail || '')) record.url = root + 'ingest/selection-thumbnails/' + record.thumbnail;

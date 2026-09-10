@@ -394,11 +394,8 @@ def _pid_is_running(pid: Any) -> bool:
     """Best-effort local process check used only to avoid duplicate resumes."""
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except (OSError, ProcessLookupError):
-        return False
-    return True
+    from .processes import process_alive
+    return process_alive(pid) is not False
 
 
 _PIPELINE_TERMINAL_STATES = frozenset({"complete", "completed", "failed", "cancelled"})

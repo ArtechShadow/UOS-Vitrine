@@ -4,6 +4,8 @@ param(
     [switch]$WithObjects,
     [switch]$OpenBrowser,
     [switch]$Offline,
+    [ValidateSet('on', 'off')]
+    [string]$LivePreviews = 'on',
     [switch]$Check,
     [Alias('Python')]
     [string]$PythonPath = '',
@@ -29,7 +31,10 @@ $previousArguments = $env:VITRINE_OBJECT_SIDECAR_ARGS_JSON
 $previousHardwareConfig = $env:VITRINE_HARDWARE_CONFIG
 $previousOffline = $env:VITRINE_OFFLINE
 $previousHfOffline = $env:HF_HUB_OFFLINE
+$previousLivePreviews = $env:VITRINE_LIVE_PREVIEWS
 try {
+    # The demo's construction map needs mapper snapshots and splat previews.
+    $env:VITRINE_LIVE_PREVIEWS = if ($LivePreviews -eq 'on') { '1' } else { '0' }
     if (-not [string]::IsNullOrWhiteSpace($HardwareConfig)) {
         $config = if ([IO.Path]::IsPathRooted($HardwareConfig)) {
             $HardwareConfig
@@ -121,4 +126,5 @@ try {
     $env:VITRINE_HARDWARE_CONFIG = $previousHardwareConfig
     $env:VITRINE_OFFLINE = $previousOffline
     $env:HF_HUB_OFFLINE = $previousHfOffline
+    $env:VITRINE_LIVE_PREVIEWS = $previousLivePreviews
 }
