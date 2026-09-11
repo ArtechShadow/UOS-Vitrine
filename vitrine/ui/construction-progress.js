@@ -13,6 +13,7 @@ viewerPanel.hidden = true;
 viewerPanel.setAttribute('aria-label', 'Completed splat viewer');
 document.getElementById('build-screen').append(viewerPanel);
 let viewerUrl = null;
+let showFeaturePoints = true;
 panel.hidden = true;
 panel.setAttribute('aria-label', 'Processing evidence');
 document.getElementById('build-screen').append(panel);
@@ -53,7 +54,7 @@ export function paintEvidence(data, stage) {
   if (stage === 'viewer') {
     panel.hidden = true;
     const url = data.final_url || '';
-    if (viewerUrl !== url) {
+    if (viewerUrl !== url || !viewerPanel.childElementCount) {
       viewerUrl = url;
       viewerPanel.replaceChildren();
       if (url) {
@@ -71,7 +72,8 @@ export function paintEvidence(data, stage) {
     }
     return;
   }
-  panel.hidden = !['ingest', 'evaluate', 'package'].includes(stage) && !(stage === 'sfm' && !(data.snapshots || []).some(s => s.kind === 'sparse'));
+  panel.hidden = !['ingest', 'evaluate', 'package'].includes(stage) && !(stage === 'sfm' && (data.substage === 'feature_extractor' || !(data.snapshots || []).some(s => s.kind === 'sparse')));
+  panel.classList.toggle('feature-detection', stage === 'sfm' && data.substage === 'feature_extractor');
   if (panel.hidden) return;
   const selection = data.selection;
   if (stage === 'ingest') {
@@ -195,13 +197,22 @@ export function paintEvidence(data, stage) {
         el('p', `${pair.inliers.toLocaleString()} verified matching points · showing ${pair.correspondences.length}. Saved comparison; updates as COLMAP commits matches.`));
       grid.prepend(wrap);
     } else if (features?.image) {
-      const wrap = el('div', null, 'feature-evidence');
+      const wrap = el('div', null, 'feature-evidence feature-keypoints');
+      const points = features.points || [];
+      filters.hidden = false;
+      const toggle = el('button', showFeaturePoints ? 'Hide feature overlay' : 'Show feature overlay');
+      toggle.type = 'button';
+      toggle.disabled = !points.length;
+      toggle.setAttribute('aria-pressed', String(showFeaturePoints));
+      toggle.onclick = () => {showFeaturePoints = !showFeaturePoints; paintEvidence(latest, selectedStage);};
+      filters.replaceChildren(toggle);
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
       svg.setAttribute('viewBox', `0 0 ${features.width} ${features.height}`);
       svg.setAttribute('role','img'); svg.setAttribute('aria-label', 'Detected image features on ' + features.image);
       const image = document.createElementNS(svg.namespaceURI, 'image'); image.setAttribute('href',features.url); image.setAttribute('width',features.width); image.setAttribute('height',features.height); svg.append(image);
-      for (const [x,y] of features.points) {const dot=document.createElementNS(svg.namespaceURI,'circle'); dot.setAttribute('cx',x);dot.setAttribute('cy',y);dot.setAttribute('r',Math.max(features.width/500,2));dot.setAttribute('fill','#ffb347');dot.setAttribute('stroke','#24140a');dot.setAttribute('stroke-width',Math.max(features.width/1600,1));svg.append(dot);}
-      wrap.append(svg,el('p',features.image)); grid.append(wrap);
+      if (showFeaturePoints) for (const [x,y] of points) {const dot=document.createElementNS(svg.namespaceURI,'circle'); dot.setAttribute('cx',x);dot.setAttribute('cy',y);dot.setAttribute('r',Math.max(features.width/650,2));dot.setAttribute('fill','#ffb347');dot.setAttribute('stroke','#24140a');dot.setAttribute('stroke-width',Math.max(features.width/1600,1));svg.append(dot);}
+      wrap.append(svg,el('p',features.image),el('p',points.length ? `Orange dots mark detected features. Showing ${points.length.toLocaleString()} of ${features.features.toLocaleString()} saved keypoints; updates as each image is processed.` : 'Waiting for COLMAP to save keypoint locations for the overlay.'));
+      grid.append(wrap);
     }
     return;
   }

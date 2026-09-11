@@ -165,6 +165,7 @@ def cmd_sfm(args: argparse.Namespace) -> int:
         run_dir / "sfm",
         max_image_size=profile.colmap_long_edge,
         use_gpu=None if args.gpu == "auto" else args.gpu == "yes",
+        matching=getattr(args, "matching", "auto"),
     )
     print(f"\n{result.registered_images} images registered · "
           f"{result.cameras} camera model(s) · {result.points:,} points")
@@ -571,6 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sfm = sub.add_parser("sfm", help="solve camera poses with COLMAP")
     p_sfm.add_argument("--gpu", default="auto", choices=("auto", "yes", "no"))
+    p_sfm.add_argument("--matching", default="auto", choices=("auto", "exhaustive", "sequential"))
     p_sfm.set_defaults(func=cmd_sfm)
 
     p_train = sub.add_parser("train", help="train the Gaussian splat")
@@ -622,6 +624,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--cleanup", action="store_true", help="save a separate cleanup candidate; preserve the master")
     p_run.add_argument("--include", nargs="*", default=None)
     p_run.add_argument("--gpu", default="auto", choices=("auto", "yes", "no"))
+    p_run.add_argument("--matching", default="auto", choices=("auto", "exhaustive", "sequential"), help="camera matching strategy; exhaustive compares every image pair")
     p_run.add_argument("--iterations", type=int, default=None)
     p_run.add_argument("--eval-every", type=int, default=2000)
     p_run.add_argument("--originals", nargs="+", default=["source"])

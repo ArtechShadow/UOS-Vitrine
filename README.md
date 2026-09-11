@@ -193,6 +193,14 @@ The dashboard itself no longer imports ``cgi``, so it can start on 3.13.
 CUDA compilation also needs a compatible host compiler: Visual Studio C++ Build
 Tools on Windows, or a CUDA-compatible GCC on Linux. See [AGENTS.md](AGENTS.md).
 
+Sony `.ARW` photographs are accepted by the dashboard and CLI. Ingest develops
+the sensor data locally using rawpy/LibRaw into sRGB JPEGs for reconstruction,
+using as-shot white balance without automatic brightness adjustment. Camera,
+lens and focal-length EXIF are retained, orientation is normalised, and decoder
+versions/settings are recorded in `ingest.json`. Original ARW files remain
+unchanged. Support for individual Sony models/compression modes depends on the
+installed LibRaw version; preflight reports files it cannot decode.
+
 Windows PowerShell:
 
 ```powershell

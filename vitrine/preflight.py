@@ -447,10 +447,12 @@ def check_preflight(
                 if path.stat().st_size == 0:
                     raise ValueError("empty file")
                 if path.suffix.lower() in IMAGE_SUFFIXES:
-                    from PIL import Image
-
-                    with Image.open(path) as image:
-                        image.verify()
+                    from .raw_io import RAW_SUFFIXES, raw_info, open_image
+                    if path.suffix.lower() in RAW_SUFFIXES:
+                        raw_info(path)
+                    else:
+                        with open_image(path) as image:
+                            image.verify()
                 elif shutil.which("ffprobe"):
                     ok, detail = _probe(
                         [

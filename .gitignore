@@ -20,6 +20,7 @@ reference/
 # Scratch / build artifacts — regenerable, not part of the record.
 tmp/
 output/
+vitrine/ui/git-identity.json
 config/local*.json
 config/user*.json
 models/

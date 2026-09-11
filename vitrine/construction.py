@@ -147,7 +147,17 @@ def atomic_json(path, value):
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        tmp.replace(path)
+        # Windows readers can briefly hold the destination without delete-share,
+        # making an otherwise atomic replace fail with WinError 5. Dashboard
+        # polling must not be able to abort a reconstruction at a stage boundary.
+        for attempt in range(6):
+            try:
+                tmp.replace(path)
+                break
+            except PermissionError:
+                if os.name != "nt" or attempt == 5:
+                    raise
+                time.sleep(0.01 * (2 ** attempt))
         if os.name != "nt":
             try:
                 directory_fd = os.open(path.parent, os.O_RDONLY)

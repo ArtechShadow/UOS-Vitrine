@@ -340,6 +340,35 @@ def _parse_multipart_form(fp: Any, headers: Any) -> _MultipartForm:
 UI_DIR = Path(__file__).resolve().parent / "ui"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+
+def _git_identity() -> dict[str, str | None]:
+    """Current branch and short SHA for the dashboard watermark. Best-effort."""
+    def _run(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(PROJECT_ROOT), *args],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if result.returncode != 0:
+            return ""
+        return (result.stdout or "").strip()
+
+    branch = _run("rev-parse", "--abbrev-ref", "HEAD") or None
+    commit = _run("rev-parse", "--short", "HEAD") or None
+    identity = {"branch": branch, "commit": commit}
+    try:
+        (UI_DIR / "git-identity.json").write_text(
+            json.dumps(identity), encoding="utf-8"
+        )
+    except OSError:
+        pass
+    return identity
+
 # progress.json is rewritten every 500 training steps (see train.py). Even on
 # the 3060 Laptop (~500 ms/iter) that is roughly every four minutes. Anything
 # older than this is treated as an interrupted run, not live training — a
@@ -348,7 +377,7 @@ PROGRESS_FRESH_SECONDS = 10 * 60
 
 UPLOAD_SUFFIXES = {
     ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp",
-    ".heic", ".heif", ".mp4", ".mov", ".m4v", ".avi", ".mkv",
+    ".heic", ".heif", ".arw", ".mp4", ".mov", ".m4v", ".avi", ".mkv",
 }
 _WINDOWS_DEVICE_NAMES = {
     "CON", "PRN", "AUX", "NUL",
@@ -1337,6 +1366,13 @@ def _truthful_construction_payload(
     payload["worker_stale"] = bool(worker.get("stale"))
     payload["worker_error"] = worker.get("error")
     payload["returncode"] = worker.get("returncode")
+    if (worker.get("state") == "running" and payload.get("stage") == "sfm"
+            and payload.get("substage") == "global_mapper"):
+        from .sfm_visual import global_mapper_progress
+        activity = global_mapper_progress(run_dir)
+        if activity:
+            payload["solver_progress"] = activity
+            payload["message"] = activity["message"]
     if worker.get("state") in {"unknown", "failed"}:
         payload["error"] = worker.get("error") or payload.get("error")
         payload["can_resume"] = bool(
@@ -1482,6 +1518,7 @@ def _doctor_payload() -> dict[str, Any]:
     return {
         "ok": ok,
         "version": __version__,
+        "git": _git_identity(),
         "cuda": status,
         "gpu": gpu,
         "tier": tier,
@@ -1653,7 +1690,7 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             return self._send_file(file_path)
 
         if path == "/api/health":
-            return self._send_json({"ok": True, "version": __version__})
+            return self._send_json({"ok": True, "version": __version__, "git": _git_identity()})
 
         if path == "/api/doctor":
             try:
@@ -1690,8 +1727,17 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             return self._send_json(report)
 
         if path == "/api/construction":
-            from .live_build import activity
-            return self._send_json({"jobs": [j for j in activity(self.runs_root)["jobs"] if self._visible(j["run"])]})
+            jobs = []
+            for run_dir in self.runs_root.iterdir():
+                if not run_dir.is_dir() or run_dir.is_symlink() or not self._visible(run_dir.name):
+                    continue
+                worker = _worker_snapshot(run_dir, self.capture_processes.get(run_dir.name))
+                if worker.get("running"):
+                    record = _pipeline_record(run_dir) or {}
+                    jobs.append({"id": run_dir.name + "/model", "run": run_dir.name,
+                                 "label": "Reconstruction", "state": "running",
+                                 "updated": record.get("updated", 0)})
+            return self._send_json({"jobs": sorted(jobs, key=lambda job: job["updated"], reverse=True)})
 
         if path.startswith("/api/construction-image/"):
             from .live_build import construction_image

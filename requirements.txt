@@ -24,5 +24,7 @@ numpy>=1.26
 scipy>=1.13          # k-NN for initial Gaussian sizing
 pillow>=10.0         # image I/O, EXIF preservation
 pillow-heif>=0.16    # iPhone HEIC/HEIF stills
+rawpy>=0.26,<0.28    # Sony ARW sensor development via LibRaw
+ExifRead>=3.5,<4     # RAW camera/lens EXIF without decoding embedded previews
 plyfile>=1.0         # 3DGS PLY read/write
 opencv-python>=4.10  # sharpness scoring

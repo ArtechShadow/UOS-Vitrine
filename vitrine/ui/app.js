@@ -1,5 +1,5 @@
 /** Vitrine local archive UI — simple (academic) or advanced (technical) view. */
-import { renderStudioLibrary, renderStudioDetail } from './studio.js';
+import { renderStudioLibrary, renderStudioDetail, renderObjectLibrary, renderSeparatedObject, collectSeparatedObjects } from './studio.js';
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const viewEl = $("#view");
@@ -9,14 +9,18 @@ const modeBannerEl = $("#mode-banner");
 const btnAdvanced = $("#btn-advanced");
 
 const MODE_KEY = "vitrine.ui.advanced";
+const SIDEBAR_KEY = "vitrine.ui.sidebar";
 
 const state = {
   view: "runs",
+  libraryKind: "scene",
   runs: [],
   selected: null,
+  selectedObject: null,
   doctor: null,
   profiles: null,
   advanced: false,
+  sidebarCollapsed: false,
   captureFiles: [],
 };
 
@@ -337,7 +341,6 @@ function applyModeChrome() {
       : "Show pipeline metrics, stage IDs, and logs";
   }
 
-  // Nav labels from data attributes
   document.querySelectorAll("#nav [data-simple][data-advanced]").forEach((el) => {
     el.textContent = state.advanced ? el.dataset.advanced : el.dataset.simple;
   });
@@ -354,24 +357,88 @@ function applyModeChrome() {
       foot.textContent = FOOTER.simple;
     }
   }
+  applySidebar();
+}
+
+function loadSidebar() {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) === "collapsed";
+  } catch {
+    return false;
+  }
+}
+
+function saveSidebar(collapsed) {
+  try {
+    localStorage.setItem(SIDEBAR_KEY, collapsed ? "collapsed" : "open");
+  } catch {
+    /* private mode / blocked storage */
+  }
+}
+
+function applySidebar() {
+  const collapsed = !!state.sidebarCollapsed;
+  document.body.classList.toggle("sidebar-collapsed", collapsed);
+  const btn = $("#btn-sidebar");
+  if (btn) {
+    btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    btn.title = collapsed ? "Open menu" : "Collapse menu";
+    const label = btn.querySelector(".sr-only");
+    if (label) label.textContent = collapsed ? "Open menu" : "Collapse menu";
+  }
 }
 
 function setAdvanced(on) {
   state.advanced = !!on;
   saveMode(state.advanced);
   applyModeChrome();
-  // Re-render current view with new copy
+  if (!state.advanced && (state.view === "doctor" || state.view === "profiles")) {
+    switchView(state.libraryKind === "object" ? "objects" : "runs");
+    if (state.doctor) renderHealthStrip(state.doctor);
+    return;
+  }
   if (state.view === "runs") renderRunsList();
+  else if (state.view === "objects") renderObjectLibrary(studioContext());
+  else if (state.view === "object" && state.selectedObject) renderSeparatedObject(state.selectedObject, studioContext());
   else if (state.view === "run" && state.selected) renderRunDetail(state.selected);
   else if (state.view === "doctor") renderDoctor();
   else if (state.view === "profiles") renderProfiles();
-  // Refresh health strip wording
+  else if (state.view === "create") renderCreate();
+  else if (state.view === "construction") loadConstructionFrame();
   if (state.doctor) renderHealthStrip(state.doctor);
 }
 
 function bindModeToggle() {
   btnAdvanced?.addEventListener("click", () => setAdvanced(!state.advanced));
   $("#btn-mode-banner-off")?.addEventListener("click", () => setAdvanced(false));
+}
+
+function bindSidebar() {
+  $("#btn-sidebar")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const collapsed = document.body.classList.contains("sidebar-collapsed");
+    state.sidebarCollapsed = !collapsed;
+    saveSidebar(state.sidebarCollapsed);
+    applySidebar();
+  });
+}
+
+function doctorGit(d) {
+  const git = d?.git || {};
+  return git.branch || d?.git_branch || git.name || null;
+}
+
+function renderBuildStamp(d) {
+  const stamp = $("#build-stamp");
+  if (!stamp) return;
+  const version = d?.version ? `Vitrine ${d.version}` : "Vitrine";
+  const git = d?.git || {};
+  const branch = doctorGit(d);
+  const commit = git.commit || d?.git_commit;
+  const extra = branch && branch !== "HEAD" ? branch : commit;
+  stamp.textContent = extra ? `${version} · ${extra}` : version;
+  stamp.title = extra ? `${version} · ${extra}${commit && extra !== commit ? ` (${commit})` : ""}` : version;
 }
 
 /* ---------- utils ---------- */
@@ -572,22 +639,49 @@ function renderHealthStrip(d) {
       <div class="meta">${escapeHtml(gpu)}</div>
       <div class="meta">tier ${escapeHtml(String(d.tier))} · v${escapeHtml(String(d.version))}</div>
     `;
+    renderBuildStamp(d);
   } else {
     const gpu = d.gpu?.available
       ? d.gpu.name
       : "Graphics hardware not detected";
     healthEl.innerHTML = `
       <span class="label">Workstation status</span>
-      <div class="${ok ? "ok" : "bad"}">${ok ? "Ready for preservation work" : "Needs attention"}</div>
+      <div class="${ok ? "ok" : "bad"}">${ok ? "Ready" : "Needs attention"}</div>
       <div class="meta">${escapeHtml(gpu)}</div>
     `;
+    renderBuildStamp(d);
   }
+  healthEl.style.cursor = isAdv() ? "pointer" : "";
+  healthEl.title = isAdv() ? "Open workstation checks" : "";
+  healthEl.onclick = isAdv() ? () => switchView("doctor") : null;
+}
+
+async function loadGitIdentity() {
+  const fromDoctor = state.doctor?.git;
+  if (fromDoctor?.branch || fromDoctor?.commit) return fromDoctor;
+  try {
+    const health = await api("/api/health");
+    if (health?.git?.branch || health?.git?.commit) return health.git;
+  } catch {
+    /* older dashboard process */
+  }
+  try {
+    const res = await fetch("/static/git-identity.json", { cache: "no-store" });
+    if (res.ok) {
+      const git = await res.json();
+      if (git?.branch || git?.commit) return git;
+    }
+  } catch {
+    /* optional static fallback */
+  }
+  return fromDoctor || {};
 }
 
 async function loadHealth() {
   try {
     const d = await api("/api/doctor");
     state.doctor = d;
+    d.git = { ...(d.git || {}), ...(await loadGitIdentity()) };
     renderHealthStrip(d);
     // Mission board shows workstation readiness — refresh if we're on the library.
     if (state.view === "runs") renderRunsList();
@@ -765,7 +859,7 @@ function renderCreate() {
       <form id="capture-form" class="capture-form">
           <fieldset class="capture-kind"><legend>What are you capturing?</legend>
             <label><input type="radio" name="capture_type" value="scene" checked/><span><strong>Scene</strong><small>A room, installation or place</small></span></label>
-            <label class="capture-kind-locked"><input type="radio" name="capture_type" value="object" disabled/><span><strong>Object <em class="coming-soon">Coming soon</em></strong><small>Individual object capture</small></span></label>
+            <label><input type="radio" name="capture_type" value="object"/><span><strong>Object</strong><small>A single item, photographed from every angle</small></span></label>
           </fieldset>
         <div class="capture-fields">
           <div class="capture-section-heading"><h3>Capture details</h3><p>Name your space and choose how to build it.</p></div>
@@ -777,7 +871,7 @@ function renderCreate() {
             <span>Description <small class="optional-label">Optional</small></span>
             <textarea id="capture-subject" name="subject" rows="3" placeholder="A short description for the preservation record"></textarea>
           </label>
-          <label>
+          <label class="capture-quality-field ${adv ? "" : "hidden"}">
             <span>Build quality</span>
             <select id="capture-quality" name="quality">
               <option value="demo" selected>Demo — measured capture recipe</option>
@@ -805,7 +899,7 @@ function renderCreate() {
           </div>
         <div class="capture-tray" id="capture-tray">
           <input id="capture-files" name="files" type="file" multiple
-            accept="image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif,video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska"/>
+            accept=".arw,image/x-sony-arw,image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif,video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska"/>
           <input id="capture-session" name="session" type="file" accept=".zip,application/zip" disabled/>
           <div class="capture-tray-mark" aria-hidden="true">
             <svg width="44" height="44" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="10" width="28" height="28" rx="5"/><path d="m9 31 8-8 7 7 4-4 7 7"/><circle cx="27" cy="19" r="2.5"/><path d="M15 6h20a5 5 0 0 1 5 5v16" opacity=".4"/><circle class="capture-upload-badge" cx="36" cy="36" r="10"/><path d="M36 41V31m-4 4 4-4 4 4"/></svg>
@@ -813,7 +907,7 @@ function renderCreate() {
           <strong id="capture-tray-title">Drop photographs or video here</strong>
           <span id="capture-tray-copy">or choose files from this computer</span>
           <button type="button" class="soft" id="btn-choose-media">Choose media</button>
-          <small id="capture-tray-hint">JPG, PNG, HEIC, TIFF, WebP · MP4, MOV, M4V, AVI, MKV</small>
+          <small id="capture-tray-hint">JPG, PNG, HEIC, TIFF, WebP, Sony ARW · MP4, MOV, M4V, AVI, MKV</small>
         </div>
 
         <div id="capture-selection" class="capture-selection hidden" aria-live="polite"></div>
@@ -847,7 +941,7 @@ function renderCreate() {
     $("#capture-note-session").classList.add("hidden");
     $("#capture-tray-title").textContent = "Drop photographs or video here";
     $("#capture-tray-copy").textContent = "or choose files from this computer";
-    $("#capture-tray-hint").textContent = "JPG, PNG, HEIC, TIFF, WebP · MP4, MOV, M4V, AVI, MKV";
+    $("#capture-tray-hint").textContent = "JPG, PNG, HEIC, TIFF, WebP, Sony ARW · MP4, MOV, M4V, AVI, MKV";
     choose.textContent = "Choose media";
     if (reset) {
       input.value = "";
@@ -869,7 +963,7 @@ function renderCreate() {
       return;
     }
     const total = state.captureFiles.reduce((sum, file) => sum + file.size, 0);
-    const images = state.captureFiles.filter((file) => file.type.startsWith("image/")).length;
+    const images = state.captureFiles.filter((file) => (file.type.startsWith("image/") || /\.(arw|heic|heif|tiff?|bmp|jpe?g|png|webp)$/i.test(file.name))).length;
     const videos = state.captureFiles.filter((file) => file.type.startsWith("video/")).length;
     (state.capturePreviewUrls || []).forEach(url => URL.revokeObjectURL(url));
     state.capturePreviewUrls = [];
@@ -907,7 +1001,7 @@ function renderCreate() {
     const data = new FormData();
     data.append("title", $("#capture-title").value);
     data.append("subject", $("#capture-subject").value);
-    data.append("quality", $("#capture-quality").value);
+    data.append("quality", adv ? ($("#capture-quality")?.value || "demo") : "demo");
     data.append("capture_type", form.elements.capture_type.value);
     state.captureFiles.forEach((file) => data.append("files", file, file.name));
 
@@ -953,6 +1047,7 @@ function renderCreate() {
       result.className = "capture-result success";
       submit.textContent = "Started";
       await loadRuns(false);
+      state.libraryKind = form.elements.capture_type.value === "object" ? "object" : "scene";
       await openRun(payload.name);
     });
     xhr.addEventListener("error", () => {
@@ -967,8 +1062,8 @@ function renderCreate() {
   const draft = state.captureDraft || {};
   $('#capture-title').value = draft.title || '';
   $('#capture-subject').value = draft.subject || '';
-  $('#capture-quality').value = draft.quality || 'demo';
-  form.elements.capture_type.value = draft.capture_type === 'object' ? 'object' : 'scene';
+  if ($('#capture-quality')) $('#capture-quality').value = draft.quality || 'demo';
+  form.elements.capture_type.value = draft.capture_type === 'object' ? 'object' : (state.libraryKind === 'object' ? 'object' : 'scene');
   const updateCaptureKind = () => {
     const object = form.elements.capture_type.value === 'object';
     $('#capture-heading').textContent = object ? 'Preserve an object, from every angle.' : 'Create a splat';
@@ -981,7 +1076,7 @@ function renderCreate() {
   form.querySelectorAll('[name="capture_type"]').forEach(input => input.addEventListener('change', updateCaptureKind));
   updateCaptureKind();
   setSourceMode(state.captureSourceMode || "media", false);
-  form.addEventListener('input',()=>{state.captureDraft={capture_type:form.elements.capture_type.value,title:$('#capture-title').value,subject:$('#capture-subject').value,quality:$('#capture-quality').value};});
+  form.addEventListener('input',()=>{state.captureDraft={capture_type:form.elements.capture_type.value,title:$('#capture-title').value,subject:$('#capture-subject').value,quality:$('#capture-quality')?.value || 'demo'};});
   if (state.captureFiles.length) setFiles(state.captureFiles);
 }
 
@@ -1173,15 +1268,17 @@ function renderRunsList() {
 }
 
 async function openRun(name) {
-  state.studioTab = null;
+  state.studioTab = "splat";
   state.view = "run";
   document.body.classList.add("run-workspace-active");
-  setNav("runs");
   stopLivePoll();
   viewEl.innerHTML = `<div class="loading">${isAdv() ? `Loading ${escapeHtml(name)}…` : "Opening archive…"}</div>`;
   try {
     const detail = await api(`/api/runs/${encodeURIComponent(name)}`);
     state.selected = detail;
+    state.libraryKind = detail.capture_type === "object" ? "object" : "scene";
+    setNav(state.libraryKind === "object" ? "objects" : "runs");
+    applySidebar();
     renderRunDetail(detail);
     showFlash(null);
     if (detail.headline?.running || detail.object_workflow?.running || detail.capture_job?.running || ["running","unknown"].includes(detail.object_meshes?.status?.state)) {
@@ -1801,10 +1898,8 @@ function renderRunDetail(run) {
   $("#btn-back")?.addEventListener("click", () => {
     stopLivePoll();
     document.body.classList.remove("run-workspace-active");
-    state.view = "runs";
     state.selected = null;
-    setNav("runs");
-    renderRunsList();
+    switchView(state.libraryKind === "object" ? "objects" : "runs");
   });
   $("#btn-log-train")?.addEventListener("click", () => loadLog(run.name, "train"));
   $("#btn-log-sfm")?.addEventListener("click", () => loadLog(run.name, "sfm"));
@@ -2258,8 +2353,89 @@ function renderProfiles() {
 
 function setNav(active) {
   document.querySelectorAll("#nav button").forEach((btn) => {
-    btn.classList.toggle("active", active != null && btn.dataset.view === active);
+    const viewMatch = active != null && btn.dataset.view === active;
+    const libraryMatch = !btn.dataset.library || btn.dataset.library === (state.libraryKind || "scene");
+    btn.classList.toggle("active", viewMatch && (btn.dataset.view !== "runs" || libraryMatch));
   });
+}
+
+function constructionFrameSrc(extra = {}) {
+  const params = new URLSearchParams({ hosted: "1" });
+  if (isAdv()) params.set("advanced", "1");
+  for (const [key, value] of Object.entries(extra)) {
+    if (value != null && value !== "") params.set(key, value);
+  }
+  return `/static/construction.html?${params}`;
+}
+
+function loadConstructionFrame() {
+  viewEl.innerHTML = `<iframe class="construction-frame" src="${constructionFrameSrc()}" title="Live reconstruction workspace" allow="fullscreen"></iframe>`;
+}
+
+function liveStageLabel(run) {
+  const stages = run?.stages || {};
+  if (!stages.ingest?.done) return "Preparing photographs";
+  if (!stages.sfm?.done) return "Finding cameras";
+  if (!stages.train?.done) return "Building the 3D model";
+  if (!stages.evaluate?.done) return "Checking quality";
+  return "Finishing archive";
+}
+
+function updateLiveJobChip(job) {
+  const nav = $("#nav-construction");
+  if (!nav) return;
+  const run = job
+    ? (state.runs || []).find((item) => item.name === job.run)
+    : (state.runs || []).find((item) => item.capture_job?.running || item.headline?.running);
+  const live = !!(job || run);
+  nav.classList.toggle("is-live", live);
+  const dot = nav.querySelector(".nav-live-dot");
+  if (dot) dot.hidden = !live;
+  const stage = $("#nav-construction-stage");
+  if (stage) {
+    stage.textContent = live
+      ? (run ? liveStageLabel(run) : "Processing locally")
+      : "Watch your capture take shape";
+  }
+  nav.title = live
+    ? `${run?.title || displayName(job?.run || run?.name || "Capture")} · live construction`
+    : "Live construction";
+}
+
+async function refreshLiveJobFromApi() {
+  try {
+    const listing = await api("/api/construction");
+    const job = (listing.jobs || []).find((item) => item.state === "running");
+    updateLiveJobChip(job || null);
+  } catch {
+    updateLiveJobChip();
+  }
+}
+
+async function openSeparatedObject(runName, objectId) {
+  const run = state.runs.find((item) => item.name === runName);
+  let records = collectSeparatedObjects(run ? [run] : state.runs, studioContext());
+  if (!records.length) {
+    try {
+      const detail = await api(`/api/runs/${encodeURIComponent(runName)}`);
+      records = collectSeparatedObjects([detail], studioContext());
+    } catch (err) {
+      showFlash(err);
+      return;
+    }
+  }
+  const item = records.find((entry) => entry.object_id === objectId) || records[0];
+  if (!item) {
+    showFlash(new Error("That object is no longer available."));
+    return;
+  }
+  state.view = "object";
+  state.libraryKind = "object";
+  state.selectedObject = item;
+  document.body.classList.remove("run-workspace-active", "construction-active");
+  setNav("objects");
+  applySidebar();
+  renderSeparatedObject(item, studioContext());
 }
 
 async function switchView(name) {
@@ -2269,16 +2445,23 @@ async function switchView(name) {
   document.body.classList.toggle('construction-active', name === 'construction');
   stopLivePoll();
   document.body.classList.remove("run-workspace-active");
+  state.selectedObject = null;
   state.view = name;
+  if (name === "runs") state.libraryKind = "scene";
+  if (name === "objects") state.libraryKind = "object";
   setNav(name);
+  applySidebar();
   showFlash(null);
   if (name === "create") {
     renderCreate();
   } else if (name === "runs") {
     await loadRuns(false);
     renderRunsList();
+  } else if (name === "objects") {
+    await loadRuns(false);
+    renderObjectLibrary(studioContext());
   } else if (name === "construction") {
-    viewEl.innerHTML = '<iframe class="construction-frame" src="/static/construction.html" title="Live reconstruction workspace" allow="fullscreen"></iframe>';
+    loadConstructionFrame();
   } else if (name === "doctor") {
     if (!state.doctor) await loadHealth();
     renderDoctor();
@@ -2300,7 +2483,9 @@ async function loadRuns(forceRender) {
     const data = await api("/api/runs");
     state.runs = data.runs || [];
     showFlash(null);
-    if (forceRender || state.view === "runs") renderRunsList();
+    updateLiveJobChip();
+    if (forceRender && state.view === "objects") renderObjectLibrary(studioContext());
+    else if (forceRender || state.view === "runs") renderRunsList();
   } catch (err) {
     showFlash(err);
   }
@@ -2308,7 +2493,10 @@ async function loadRuns(forceRender) {
 
 function bindNav() {
   document.querySelectorAll("#nav button").forEach((btn) => {
-    btn.addEventListener("click", () => switchView(btn.dataset.view));
+    btn.addEventListener("click", () => {
+      if (btn.dataset.library) state.libraryKind = btn.dataset.library;
+      switchView(btn.dataset.view);
+    });
   });
 }
 
@@ -2328,6 +2516,8 @@ function studioContext() {
     startObjectMesh,
     controlRun,
     recoveryState,
+    openSeparatedObject,
+    applySidebar,
   };
 }
 
@@ -2335,6 +2525,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && state.presenting) {
     state.presenting = false;
     document.body.classList.remove('presentation-mode');
+    applySidebar();
     const button = $('#studio-present');
     if (button) { button.textContent = 'Present'; button.setAttribute('aria-pressed', 'false'); }
   }
@@ -2344,9 +2535,14 @@ window.addEventListener('beforeunload', (event) => {
 });
 
 state.advanced = loadMode();
+state.sidebarCollapsed = loadSidebar();
 bindModeToggle();
+bindSidebar();
 applyModeChrome();
 bindNav();
 loadHealth();
 const initialView = new URLSearchParams(location.search).get("view");
-switchView(["create", "construction"].includes(initialView) ? initialView : "runs");
+const initialKind = new URLSearchParams(location.search).get("library");
+if (initialKind === "object") state.libraryKind = "object";
+switchView(["create", "construction", "objects"].includes(initialView) ? initialView : (state.libraryKind === "object" ? "objects" : "runs"));
+setInterval(() => { if (!document.hidden) refreshLiveJobFromApi(); }, 8000);
