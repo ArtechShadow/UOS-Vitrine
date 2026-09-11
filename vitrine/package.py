@@ -140,7 +140,13 @@ def _copy_tree(src: Path, dest: Path, *, description: str, on_copied=None) -> in
     dest.mkdir(parents=True, exist_ok=True)
     count = 0
     if src.is_file():
-        shutil.copy2(src, dest / src.name)
+        target = dest / src.name
+        if target.exists() and sha256(target) != sha256(src):
+            raise ValueError(f"Conflicting preservation destination: {target.name}")
+        before = sha256(src)
+        shutil.copy2(src, target)
+        if before != sha256(target) or before != sha256(src):
+            raise ValueError(f"Source changed during preservation copy: {src.name}")
         if on_copied:
             on_copied(src.name)
         return 1
@@ -148,7 +154,12 @@ def _copy_tree(src: Path, dest: Path, *, description: str, on_copied=None) -> in
         if item.is_file():
             target = dest / item.relative_to(src)
             target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and sha256(target) != sha256(item):
+                raise ValueError(f"Conflicting preservation destination: {target.name}")
+            before = sha256(item)
             shutil.copy2(item, target)
+            if before != sha256(target) or before != sha256(item):
+                raise ValueError(f"Source changed during preservation copy: {item.name}")
             count += 1
             if on_copied:
                 on_copied(item.name)
@@ -456,7 +467,7 @@ def verify_package(root: Path) -> tuple[bool, list[str]]:
     """
     root = Path(root)
     manifest_path = root / "manifest.json"
-    if not manifest_path.is_file():
+    if not manifest_path.is_file() or manifest_path.is_symlink():
         return False, [f"no manifest at {manifest_path}"]
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -488,6 +499,10 @@ def verify_package(root: Path) -> tuple[bool, list[str]]:
             continue
         listed.add(rel)
         path = root / rel
+        if any((root.joinpath(*pp.parts[:i])).is_symlink()
+               for i in range(1, len(pp.parts) + 1)):
+            problems.append(f"UNSAFE SYMLINK {rel}")
+            continue
         if not path.is_file() or path.is_symlink():
             problems.append(f"MISSING {rel}")
             continue
@@ -501,6 +516,9 @@ def verify_package(root: Path) -> tuple[bool, list[str]]:
     # Exact inventory: any regular file on disk that is not listed (and is not
     # package metadata) is an intrusion or a packaging bug.
     for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            problems.append(f"UNSAFE SYMLINK {path.relative_to(root).as_posix()}")
+            continue
         if path.is_file() and not path.is_symlink():
             rel = path.relative_to(root).as_posix()
             if rel not in listed and rel not in _UNLISTED_METADATA:

@@ -5,6 +5,7 @@ import time
 import uuid
 
 from PIL import Image, ImageOps
+from .raw_io import open_image
 
 from .construction import atomic_json
 
@@ -60,7 +61,7 @@ class IngestPreview:
         try:
             target = self.folder / 'selection-thumbnails' / (record['id'] + '.jpg')
             target.parent.mkdir(parents=True, exist_ok=True)
-            with Image.open(path) as original:
+            with open_image(path, preview=True) as original:
                 original.thumbnail((256, 192))
                 thumb = ImageOps.exif_transpose(original).convert('RGB')
                 thumb.save(target, 'JPEG', quality=75)

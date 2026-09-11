@@ -1,5 +1,5 @@
 /** Vitrine local archive UI — simple (academic) or advanced (technical) view. */
-import { renderStudioLibrary, renderStudioDetail } from './studio.js';
+import { renderStudioLibrary, renderStudioDetail, renderObjectLibrary, renderSeparatedObject, collectSeparatedObjects } from './studio.js';
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const viewEl = $("#view");
@@ -9,14 +9,18 @@ const modeBannerEl = $("#mode-banner");
 const btnAdvanced = $("#btn-advanced");
 
 const MODE_KEY = "vitrine.ui.advanced";
+const SIDEBAR_KEY = "vitrine.ui.sidebar";
 
 const state = {
   view: "runs",
+  libraryKind: "scene",
   runs: [],
   selected: null,
+  selectedObject: null,
   doctor: null,
   profiles: null,
   advanced: false,
+  sidebarCollapsed: false,
   captureFiles: [],
 };
 
@@ -337,7 +341,6 @@ function applyModeChrome() {
       : "Show pipeline metrics, stage IDs, and logs";
   }
 
-  // Nav labels from data attributes
   document.querySelectorAll("#nav [data-simple][data-advanced]").forEach((el) => {
     el.textContent = state.advanced ? el.dataset.advanced : el.dataset.simple;
   });
@@ -354,24 +357,88 @@ function applyModeChrome() {
       foot.textContent = FOOTER.simple;
     }
   }
+  applySidebar();
+}
+
+function loadSidebar() {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) === "collapsed";
+  } catch {
+    return false;
+  }
+}
+
+function saveSidebar(collapsed) {
+  try {
+    localStorage.setItem(SIDEBAR_KEY, collapsed ? "collapsed" : "open");
+  } catch {
+    /* private mode / blocked storage */
+  }
+}
+
+function applySidebar() {
+  const collapsed = !!state.sidebarCollapsed;
+  document.body.classList.toggle("sidebar-collapsed", collapsed);
+  const btn = $("#btn-sidebar");
+  if (btn) {
+    btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    btn.title = collapsed ? "Open menu" : "Collapse menu";
+    const label = btn.querySelector(".sr-only");
+    if (label) label.textContent = collapsed ? "Open menu" : "Collapse menu";
+  }
 }
 
 function setAdvanced(on) {
   state.advanced = !!on;
   saveMode(state.advanced);
   applyModeChrome();
-  // Re-render current view with new copy
+  if (!state.advanced && (state.view === "doctor" || state.view === "profiles")) {
+    switchView(state.libraryKind === "object" ? "objects" : "runs");
+    if (state.doctor) renderHealthStrip(state.doctor);
+    return;
+  }
   if (state.view === "runs") renderRunsList();
+  else if (state.view === "objects") renderObjectLibrary(studioContext());
+  else if (state.view === "object" && state.selectedObject) renderSeparatedObject(state.selectedObject, studioContext());
   else if (state.view === "run" && state.selected) renderRunDetail(state.selected);
   else if (state.view === "doctor") renderDoctor();
   else if (state.view === "profiles") renderProfiles();
-  // Refresh health strip wording
+  else if (state.view === "create") renderCreate();
+  else if (state.view === "construction") loadConstructionFrame();
   if (state.doctor) renderHealthStrip(state.doctor);
 }
 
 function bindModeToggle() {
   btnAdvanced?.addEventListener("click", () => setAdvanced(!state.advanced));
   $("#btn-mode-banner-off")?.addEventListener("click", () => setAdvanced(false));
+}
+
+function bindSidebar() {
+  $("#btn-sidebar")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const collapsed = document.body.classList.contains("sidebar-collapsed");
+    state.sidebarCollapsed = !collapsed;
+    saveSidebar(state.sidebarCollapsed);
+    applySidebar();
+  });
+}
+
+function doctorGit(d) {
+  const git = d?.git || {};
+  return git.branch || d?.git_branch || git.name || null;
+}
+
+function renderBuildStamp(d) {
+  const stamp = $("#build-stamp");
+  if (!stamp) return;
+  const version = d?.version ? `Vitrine ${d.version}` : "Vitrine";
+  const git = d?.git || {};
+  const branch = doctorGit(d);
+  const commit = git.commit || d?.git_commit;
+  const extra = branch && branch !== "HEAD" ? branch : commit;
+  stamp.textContent = extra ? `${version} · ${extra}` : version;
+  stamp.title = extra ? `${version} · ${extra}${commit && extra !== commit ? ` (${commit})` : ""}` : version;
 }
 
 /* ---------- utils ---------- */
@@ -486,6 +553,68 @@ async function api(path) {
   return res.json();
 }
 
+async function postApi(path, body = {}) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  let payload = {};
+  try {
+    payload = await res.json();
+  } catch {
+    /* keep the HTTP status as the useful error */
+  }
+  if (!res.ok) throw new Error(payload.error || `${res.status} ${res.statusText}`);
+  return payload;
+}
+
+function recoveryState(run) {
+  const headline = run?.headline || {};
+  const job = run?.capture_job || {};
+  const pipeline = run?.pipeline || {};
+  const worker = headline.worker_state || job.state || pipeline.state;
+  const running = !!(headline.running || job.running);
+  const stale = !!(job.stale || job.recovery_required || headline.worker_stale);
+  const recoverable = !!pipeline.schema && !running && (
+    stale || headline.interrupted || ["failed", "cancelled", "unknown"].includes(worker)
+  );
+  return { headline, job, pipeline, worker, running, stale, recoverable };
+}
+
+function recoveryControlsHtml(run, adv = true) {
+  const state = recoveryState(run);
+  if (!state.pipeline.schema && !state.running) return "";
+  const controls = [];
+  if (state.running) {
+    controls.push(`<button type="button" class="ghost" id="btn-cancel-run">${adv ? "Request cancel" : "Stop processing"}</button>`);
+  }
+  if (state.recoverable) {
+    controls.push(`<button type="button" class="primary" id="btn-resume-run">${adv ? "Resume pipeline" : "Resume build"}</button>`);
+  }
+  controls.push(`<button type="button" class="ghost" id="btn-refresh-run">${adv ? "Refresh state" : "Refresh"}</button>`);
+  return controls.join(" ");
+}
+
+function recoveryBannerHtml(run, adv = true) {
+  const state = recoveryState(run);
+  if (state.running) return "";
+  if (state.stale || ["unknown"].includes(state.worker)) {
+    return `<div class="live-banner interrupted" role="status">
+      ${adv ? "Pipeline worker state is unknown" : "This build needs attention"} — the worker is no longer running and no terminal state was recorded. Completed stages remain on disk.
+      ${state.recoverable ? "Use Resume to continue from verified stages." : "Inspect the log and continue from the command line."}
+    </div>`;
+  }
+  if (state.worker === "failed" || state.headline.interrupted) {
+    return `<div class="live-banner interrupted" role="status">
+      ${adv ? "Pipeline stopped before completion" : "This build stopped before completion"}. ${escapeHtml(state.job.error || state.headline.worker_error || state.pipeline.error || "Completed stages remain available.")}
+      ${state.recoverable ? "Use Resume to retry verified stages." : "Review the saved log before retrying."}
+    </div>`;
+  }
+  return "";
+}
+
 function showFlash(err) {
   if (!err) {
     flashEl.classList.add("hidden");
@@ -510,22 +639,49 @@ function renderHealthStrip(d) {
       <div class="meta">${escapeHtml(gpu)}</div>
       <div class="meta">tier ${escapeHtml(String(d.tier))} · v${escapeHtml(String(d.version))}</div>
     `;
+    renderBuildStamp(d);
   } else {
     const gpu = d.gpu?.available
       ? d.gpu.name
       : "Graphics hardware not detected";
     healthEl.innerHTML = `
       <span class="label">Workstation status</span>
-      <div class="${ok ? "ok" : "bad"}">${ok ? "Ready for preservation work" : "Needs attention"}</div>
+      <div class="${ok ? "ok" : "bad"}">${ok ? "Ready" : "Needs attention"}</div>
       <div class="meta">${escapeHtml(gpu)}</div>
     `;
+    renderBuildStamp(d);
   }
+  healthEl.style.cursor = isAdv() ? "pointer" : "";
+  healthEl.title = isAdv() ? "Open workstation checks" : "";
+  healthEl.onclick = isAdv() ? () => switchView("doctor") : null;
+}
+
+async function loadGitIdentity() {
+  const fromDoctor = state.doctor?.git;
+  if (fromDoctor?.branch || fromDoctor?.commit) return fromDoctor;
+  try {
+    const health = await api("/api/health");
+    if (health?.git?.branch || health?.git?.commit) return health.git;
+  } catch {
+    /* older dashboard process */
+  }
+  try {
+    const res = await fetch("/static/git-identity.json", { cache: "no-store" });
+    if (res.ok) {
+      const git = await res.json();
+      if (git?.branch || git?.commit) return git;
+    }
+  } catch {
+    /* optional static fallback */
+  }
+  return fromDoctor || {};
 }
 
 async function loadHealth() {
   try {
     const d = await api("/api/doctor");
     state.doctor = d;
+    d.git = { ...(d.git || {}), ...(await loadGitIdentity()) };
     renderHealthStrip(d);
     // Mission board shows workstation readiness — refresh if we're on the library.
     if (state.view === "runs") renderRunsList();
@@ -703,7 +859,7 @@ function renderCreate() {
       <form id="capture-form" class="capture-form">
           <fieldset class="capture-kind"><legend>What are you capturing?</legend>
             <label><input type="radio" name="capture_type" value="scene" checked/><span><strong>Scene</strong><small>A room, installation or place</small></span></label>
-            <label class="capture-kind-locked"><input type="radio" name="capture_type" value="object" disabled/><span><strong>Object <em class="coming-soon">Coming soon</em></strong><small>Individual object capture</small></span></label>
+            <label><input type="radio" name="capture_type" value="object"/><span><strong>Object</strong><small>A single item, photographed from every angle</small></span></label>
           </fieldset>
         <div class="capture-fields">
           <div class="capture-section-heading"><h3>Capture details</h3><p>Name your space and choose how to build it.</p></div>
@@ -715,7 +871,7 @@ function renderCreate() {
             <span>Description <small class="optional-label">Optional</small></span>
             <textarea id="capture-subject" name="subject" rows="3" placeholder="A short description for the preservation record"></textarea>
           </label>
-          <label>
+          <label class="capture-quality-field ${adv ? "" : "hidden"}">
             <span>Build quality</span>
             <select id="capture-quality" name="quality">
               <option value="demo" selected>Demo — measured capture recipe</option>
@@ -743,7 +899,7 @@ function renderCreate() {
           </div>
         <div class="capture-tray" id="capture-tray">
           <input id="capture-files" name="files" type="file" multiple
-            accept="image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif,video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska"/>
+            accept=".arw,image/x-sony-arw,image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif,video/mp4,video/quicktime,video/x-m4v,video/x-msvideo,video/x-matroska"/>
           <input id="capture-session" name="session" type="file" accept=".zip,application/zip" disabled/>
           <div class="capture-tray-mark" aria-hidden="true">
             <svg width="44" height="44" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="10" width="28" height="28" rx="5"/><path d="m9 31 8-8 7 7 4-4 7 7"/><circle cx="27" cy="19" r="2.5"/><path d="M15 6h20a5 5 0 0 1 5 5v16" opacity=".4"/><circle class="capture-upload-badge" cx="36" cy="36" r="10"/><path d="M36 41V31m-4 4 4-4 4 4"/></svg>
@@ -751,7 +907,7 @@ function renderCreate() {
           <strong id="capture-tray-title">Drop photographs or video here</strong>
           <span id="capture-tray-copy">or choose files from this computer</span>
           <button type="button" class="soft" id="btn-choose-media">Choose media</button>
-          <small id="capture-tray-hint">JPG, PNG, HEIC, TIFF, WebP · MP4, MOV, M4V, AVI, MKV</small>
+          <small id="capture-tray-hint">JPG, PNG, HEIC, TIFF, WebP, Sony ARW · MP4, MOV, M4V, AVI, MKV</small>
         </div>
 
         <div id="capture-selection" class="capture-selection hidden" aria-live="polite"></div>
@@ -785,7 +941,7 @@ function renderCreate() {
     $("#capture-note-session").classList.add("hidden");
     $("#capture-tray-title").textContent = "Drop photographs or video here";
     $("#capture-tray-copy").textContent = "or choose files from this computer";
-    $("#capture-tray-hint").textContent = "JPG, PNG, HEIC, TIFF, WebP · MP4, MOV, M4V, AVI, MKV";
+    $("#capture-tray-hint").textContent = "JPG, PNG, HEIC, TIFF, WebP, Sony ARW · MP4, MOV, M4V, AVI, MKV";
     choose.textContent = "Choose media";
     if (reset) {
       input.value = "";
@@ -807,7 +963,7 @@ function renderCreate() {
       return;
     }
     const total = state.captureFiles.reduce((sum, file) => sum + file.size, 0);
-    const images = state.captureFiles.filter((file) => file.type.startsWith("image/")).length;
+    const images = state.captureFiles.filter((file) => (file.type.startsWith("image/") || /\.(arw|heic|heif|tiff?|bmp|jpe?g|png|webp)$/i.test(file.name))).length;
     const videos = state.captureFiles.filter((file) => file.type.startsWith("video/")).length;
     (state.capturePreviewUrls || []).forEach(url => URL.revokeObjectURL(url));
     state.capturePreviewUrls = [];
@@ -845,7 +1001,7 @@ function renderCreate() {
     const data = new FormData();
     data.append("title", $("#capture-title").value);
     data.append("subject", $("#capture-subject").value);
-    data.append("quality", $("#capture-quality").value);
+    data.append("quality", adv ? ($("#capture-quality")?.value || "demo") : "demo");
     data.append("capture_type", form.elements.capture_type.value);
     state.captureFiles.forEach((file) => data.append("files", file, file.name));
 
@@ -891,6 +1047,7 @@ function renderCreate() {
       result.className = "capture-result success";
       submit.textContent = "Started";
       await loadRuns(false);
+      state.libraryKind = form.elements.capture_type.value === "object" ? "object" : "scene";
       await openRun(payload.name);
     });
     xhr.addEventListener("error", () => {
@@ -905,8 +1062,8 @@ function renderCreate() {
   const draft = state.captureDraft || {};
   $('#capture-title').value = draft.title || '';
   $('#capture-subject').value = draft.subject || '';
-  $('#capture-quality').value = draft.quality || 'demo';
-  form.elements.capture_type.value = draft.capture_type === 'object' ? 'object' : 'scene';
+  if ($('#capture-quality')) $('#capture-quality').value = draft.quality || 'demo';
+  form.elements.capture_type.value = draft.capture_type === 'object' ? 'object' : (state.libraryKind === 'object' ? 'object' : 'scene');
   const updateCaptureKind = () => {
     const object = form.elements.capture_type.value === 'object';
     $('#capture-heading').textContent = object ? 'Preserve an object, from every angle.' : 'Create a splat';
@@ -919,7 +1076,7 @@ function renderCreate() {
   form.querySelectorAll('[name="capture_type"]').forEach(input => input.addEventListener('change', updateCaptureKind));
   updateCaptureKind();
   setSourceMode(state.captureSourceMode || "media", false);
-  form.addEventListener('input',()=>{state.captureDraft={capture_type:form.elements.capture_type.value,title:$('#capture-title').value,subject:$('#capture-subject').value,quality:$('#capture-quality').value};});
+  form.addEventListener('input',()=>{state.captureDraft={capture_type:form.elements.capture_type.value,title:$('#capture-title').value,subject:$('#capture-subject').value,quality:$('#capture-quality')?.value || 'demo'};});
   if (state.captureFiles.length) setFiles(state.captureFiles);
 }
 
@@ -1111,15 +1268,17 @@ function renderRunsList() {
 }
 
 async function openRun(name) {
-  state.studioTab = null;
+  state.studioTab = "splat";
   state.view = "run";
   document.body.classList.add("run-workspace-active");
-  setNav("runs");
   stopLivePoll();
   viewEl.innerHTML = `<div class="loading">${isAdv() ? `Loading ${escapeHtml(name)}…` : "Opening archive…"}</div>`;
   try {
     const detail = await api(`/api/runs/${encodeURIComponent(name)}`);
     state.selected = detail;
+    state.libraryKind = detail.capture_type === "object" ? "object" : "scene";
+    setNav(state.libraryKind === "object" ? "objects" : "runs");
+    applySidebar();
     renderRunDetail(detail);
     showFlash(null);
     if (detail.headline?.running || detail.object_workflow?.running || detail.capture_job?.running || ["running","unknown"].includes(detail.object_meshes?.status?.state)) {
@@ -1130,6 +1289,31 @@ async function openRun(name) {
     showFlash(err);
     state.view = "runs";
     renderRunsList();
+  }
+}
+
+async function controlRun(name, action) {
+  const label = action === "cancel" ? "Cancellation" : action === "resume" ? "Resume" : "Refresh";
+  try {
+    const result = await postApi(`/api/runs/${encodeURIComponent(name)}/${action}`);
+    if (action === "cancel") {
+      showFlash(null);
+    }
+    return result;
+  } catch (error) {
+    showFlash(new Error(`${label} failed: ${error.message}`));
+    throw error;
+  }
+}
+
+async function runRecoveryAction(name, action) {
+  const button = document.querySelector(`#btn-${action}-run`);
+  if (button) button.disabled = true;
+  try {
+    await controlRun(name, action);
+    await openRun(name);
+  } catch {
+    if (button) button.disabled = false;
   }
 }
 
@@ -1157,6 +1341,8 @@ function startLivePoll(name) {
 function objectSeparationHtml(run, adv) {
   const flow = run.object_workflow || {};
   const outputs = flow.outputs;
+  const meshOutputs = run.object_meshes || {};
+  const meshById = new Map((meshOutputs.objects || []).map((mesh) => [mesh.object_id, mesh]));
   if (!adv && !flow.configured && !outputs && !flow.running) return "";
   const inputs = (flow.inputs || []).map((item) => `
     <a class="object-input" href="${item.url}" download>
@@ -1164,27 +1350,65 @@ function objectSeparationHtml(run, adv) {
       <strong>${escapeHtml(item.name)}</strong>
       <em>${fmtBytes(item.bytes)}</em>
     </a>`).join("");
-  const objectCards = (outputs?.objects || []).map((item) => `
+  const objectCards = (outputs?.objects || []).map((item) => {
+    const mesh = meshById.get(item.object_id);
+    const evidence = item.evidence?.items || [];
+    const identity = item.evidence?.identity || {};
+    const observations = item.evidence?.observations || [];
+    const identityText = Object.entries(identity)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" · ");
+    const observedIdentity = Object.entries(observations[0] || {})
+      .filter(([key]) => ["image_id", "camera_id", "instance_id", "detection_id", "source_frame_id"].includes(key))
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" · ");
+    const observationText = observations.length
+      ? `${observations.length} registered mask/frame association${observations.length === 1 ? "" : "s"}${observedIdentity ? ` · ${observedIdentity}` : identityText ? ` · ${identityText}` : ""}`
+      : identityText;
+    const evidenceHtml = evidence.length
+      ? `<div class="object-evidence" aria-label="Source evidence">${evidence.map((entry) => `<a href="${escapeHtml(entry.url)}" target="_blank" rel="noopener">${escapeHtml(entry.label)} ↗</a>`).join(" ")}</div>`
+      : `<span class="object-evidence-missing">No copied source or mask evidence</span>`;
+    const observedCandidate = item.asset_type === "gaussian-splat" || !!item.splat_url;
+    const meshMarker = `/files/${encodeURIComponent(run.name)}/`;
+    let meshAsset = "";
+    if (mesh?.glb_url?.startsWith(meshMarker)) {
+      try { meshAsset = decodeURIComponent(mesh.glb_url.slice(meshMarker.length)); } catch { meshAsset = ""; }
+    }
+    const meshLink = meshAsset
+      ? `<a href="/static/mesh-viewer.html?run=${encodeURIComponent(run.name)}&asset=${encodeURIComponent(meshAsset)}&label=${encodeURIComponent(item.label || item.object_id || "Object")}" target="_blank" rel="noopener">Inspect reconstructed GLB ↗</a><a href="${escapeHtml(mesh.glb_url)}" download>Download GLB ↓</a>`
+      : mesh?.url
+        ? `<a href="${escapeHtml(mesh.url)}" download>Download reconstructed PLY ↓</a>`
+        : "";
+    return `
     <article class="object-result">
       <div class="object-thumb ${item.thumb_url ? "" : "object-thumb-empty"}">
         ${item.thumb_url
-          ? `<img src="${item.thumb_url}" alt="Separated ${escapeHtml(item.label || "object")}" loading="lazy"/>`
+          ? `<img src="${escapeHtml(item.thumb_url)}" alt="Source evidence for ${escapeHtml(item.label || "object")}" loading="lazy"/>`
           : `<span aria-hidden="true">◇</span>`}
       </div>
       <div class="object-result-copy">
         <strong>${escapeHtml(item.label || item.object_id || "Unlabelled object")}</strong>
-        <span>${item.confidence != null ? `${fmt(item.confidence * 100, 0)}% confidence` : "Validated output"}${item.coverage != null ? ` · ${fmt(item.coverage * 100, 0)}% coverage` : ""}</span>
-        ${item.mesh_url ? `<a href="${item.mesh_url}" download>Download ${escapeHtml(item.mesh_name || "3D model")}</a>` : ""}
+        <span>${item.confidence != null ? `${fmt(item.confidence * 100, 0)}% carve consistency` : "Validated output"}${item.coverage != null ? ` · ${fmt(item.coverage * 100, 0)}% coverage` : ""}</span>
+        ${item.thumb_kind === "source-crop" ? `<small class="object-source-note">Source crop · evidence preview, not a mesh render</small>` : ""}
+        ${observationText ? `<small class="object-source-note mono">${escapeHtml(observationText)}</small>` : ""}
+        ${evidenceHtml}
+        ${item.splat_url ? `<a href="${escapeHtml(item.viewer_url || "#")}" target="_blank" rel="noopener">Inspect observed splat ↗</a>` : ""}
+        ${observedCandidate && !meshLink ? `<button type="button" class="soft" data-object-mesh="${escapeHtml(item.object_id || "")}" ${meshOutputs.status?.state === "running" ? "disabled" : ""}>Reconstruct surface</button>` : ""}
+        ${meshLink}
       </div>
-    </article>`).join("");
+    </article>`;
+  }).join("");
+  const sidecarReady = flow.configured && flow.executable_available !== false && !flow.configuration_error;
   const status = flow.running ? "Separating objects…" : outputs
     ? `${fmt(outputs.count)} object${outputs.count === 1 ? "" : "s"} separated`
-    : !flow.configured ? "Sidecar not connected" : flow.ready ? "Ready to separate" : "3D model required";
-  const disabled = !flow.ready || !flow.configured || flow.running;
-  const reason = !flow.ready
-    ? "Build or export the splat first. The separator uses the registered views, camera poses, and available 3D model outputs."
+    : !flow.configured ? "Sidecar not connected" : !sidecarReady ? "Sidecar unavailable" : !flow.source_ready && flow.missing_inputs?.length ? "Inputs incomplete" : flow.ready ? "Ready to separate" : "3D model required";
+  const disabled = !flow.ready || flow.source_ready === false || !sidecarReady || flow.running;
+  const reason = flow.configuration_error
+    ? flow.configuration_error
     : !flow.configured
       ? "Set VITRINE_OBJECT_SIDECAR before starting the dashboard to connect the external object model."
+      : flow.source_ready === false
+        ? `Required source evidence is missing: ${(flow.missing_inputs || []).join(", ")}.`
       : "The external sidecar reads this run in place and publishes only validated, checksummed 3D outputs.";
   return `
     <section class="card object-workbench section-gap" aria-labelledby="object-separation-title">
@@ -1215,6 +1439,8 @@ function objectSeparationHtml(run, adv) {
       ${outputs?.composed_scene ? `<div class="composed-scene-link"><span>Composed scene</span><a href="${outputs.composed_scene.url}" download>Download placed GLB</a><em>Observed scene + generated object derivatives</em></div>` : ""}
       ${flow.running ? `<div class="object-progress" role="status"><i></i><span>The sidecar is processing locally. This view updates every four seconds.</span></div>` : ""}
       <div class="object-feedback" id="object-feedback" aria-live="polite"></div>
+      ${meshOutputs.status?.state === "running" ? `<div class="object-progress" role="status"><i></i><span>Surface reconstruction is running locally. The selected object remains available as an observed splat.</span></div>` : ""}
+      ${meshOutputs.status?.state === "unknown" ? `<p class="object-feedback" role="status">Surface reconstruction state is unknown; inspect the log before retrying.</p>` : ""}
     </section>`;
 }
 
@@ -1406,7 +1632,7 @@ function renderRunDetail(run) {
            ${h.eta_minutes != null ? ` · about ${fmt(h.eta_minutes, 0)} minutes remaining` : ""}
            · this page updates automatically
          </div>`
-    : h.interrupted
+    : h.interrupted && !recoveryState(run).stale
       ? adv
         ? `<div class="live-banner interrupted" role="status">
              Training interrupted at step ${fmt(h.step)}/${fmt(stages.train?.report?.iterations)}
@@ -1418,9 +1644,11 @@ function renderRunDetail(run) {
              and is not running now. The 3D model was not finished.
            </div>`
       : "";
+  const recoveryBanner = recoveryBannerHtml(run, adv);
 
   viewEl.innerHTML = `
     ${liveBanner}
+    ${recoveryBanner}
 
     <div class="page-header">
       <div>
@@ -1444,7 +1672,8 @@ function renderRunDetail(run) {
         ${
           adv
             ? `<button type="button" id="btn-log-train" class="ghost">Train log</button>
-               <button type="button" id="btn-log-sfm" class="ghost">SfM log</button>`
+               <button type="button" id="btn-log-sfm" class="ghost">SfM log</button>
+               ${recoveryControlsHtml(run, adv)}`
             : ""
         }
       </div>
@@ -1669,16 +1898,20 @@ function renderRunDetail(run) {
   $("#btn-back")?.addEventListener("click", () => {
     stopLivePoll();
     document.body.classList.remove("run-workspace-active");
-    state.view = "runs";
     state.selected = null;
-    setNav("runs");
-    renderRunsList();
+    switchView(state.libraryKind === "object" ? "objects" : "runs");
   });
   $("#btn-log-train")?.addEventListener("click", () => loadLog(run.name, "train"));
   $("#btn-log-sfm")?.addEventListener("click", () => loadLog(run.name, "sfm"));
   $("#btn-log-train-panel")?.addEventListener("click", () => loadLog(run.name, "train"));
   $("#btn-log-sfm-panel")?.addEventListener("click", () => loadLog(run.name, "sfm"));
+  $("#btn-resume-run")?.addEventListener("click", () => runRecoveryAction(run.name, "resume"));
+  $("#btn-cancel-run")?.addEventListener("click", () => runRecoveryAction(run.name, "cancel"));
+  $("#btn-refresh-run")?.addEventListener("click", () => openRun(run.name));
   $("#btn-separate-objects")?.addEventListener("click", () => startObjectSeparation(run.name));
+  viewEl.querySelectorAll("[data-object-mesh]").forEach((button) => {
+    button.addEventListener("click", () => startObjectMesh(run.name, button.dataset.objectMesh));
+  });
 
   if (history.length) drawHistoryChart($("#hist-chart"), history);
 }
@@ -1695,11 +1928,32 @@ async function startObjectSeparation(name) {
     if (feedback) feedback.textContent = "Object separation started.";
     const detail = await api(`/api/runs/${encodeURIComponent(name)}`);
     state.selected = detail;
+    if (!isAdv()) state.studioTab = "objects";
     renderRunDetail(detail);
     loadLog(name, "objects");
     startLivePoll(name);
   } catch (err) {
     if (feedback) feedback.textContent = String(err.message || err);
+    if (button) button.disabled = false;
+  }
+}
+
+async function startObjectMesh(name, objectId) {
+  const button = Array.from(document.querySelectorAll("[data-object-mesh]"))
+    .find((candidate) => candidate.dataset.objectMesh === objectId);
+  const feedback = document.querySelector("#object-mesh-feedback") || document.querySelector("#mesh-feedback");
+  if (button) button.disabled = true;
+  if (feedback) feedback.textContent = `Starting surface reconstruction for ${objectId}…`;
+  try {
+    const payload = await postApi(`/api/runs/${encodeURIComponent(name)}/object-meshes`, { object_id: objectId });
+    if (feedback) feedback.textContent = `Surface reconstruction started for ${payload.object_id || objectId}.`;
+    const detail = await api(`/api/runs/${encodeURIComponent(name)}`);
+    state.selected = detail;
+    if (!isAdv()) state.studioTab = "objects";
+    renderRunDetail(detail);
+    startLivePoll(name);
+  } catch (error) {
+    if (feedback) feedback.textContent = String(error.message || error);
     if (button) button.disabled = false;
   }
 }
@@ -2099,8 +2353,89 @@ function renderProfiles() {
 
 function setNav(active) {
   document.querySelectorAll("#nav button").forEach((btn) => {
-    btn.classList.toggle("active", active != null && btn.dataset.view === active);
+    const viewMatch = active != null && btn.dataset.view === active;
+    const libraryMatch = !btn.dataset.library || btn.dataset.library === (state.libraryKind || "scene");
+    btn.classList.toggle("active", viewMatch && (btn.dataset.view !== "runs" || libraryMatch));
   });
+}
+
+function constructionFrameSrc(extra = {}) {
+  const params = new URLSearchParams({ hosted: "1" });
+  if (isAdv()) params.set("advanced", "1");
+  for (const [key, value] of Object.entries(extra)) {
+    if (value != null && value !== "") params.set(key, value);
+  }
+  return `/static/construction.html?${params}`;
+}
+
+function loadConstructionFrame() {
+  viewEl.innerHTML = `<iframe class="construction-frame" src="${constructionFrameSrc()}" title="Live reconstruction workspace" allow="fullscreen"></iframe>`;
+}
+
+function liveStageLabel(run) {
+  const stages = run?.stages || {};
+  if (!stages.ingest?.done) return "Preparing photographs";
+  if (!stages.sfm?.done) return "Finding cameras";
+  if (!stages.train?.done) return "Building the 3D model";
+  if (!stages.evaluate?.done) return "Checking quality";
+  return "Finishing archive";
+}
+
+function updateLiveJobChip(job) {
+  const nav = $("#nav-construction");
+  if (!nav) return;
+  const run = job
+    ? (state.runs || []).find((item) => item.name === job.run)
+    : (state.runs || []).find((item) => item.capture_job?.running || item.headline?.running);
+  const live = !!(job || run);
+  nav.classList.toggle("is-live", live);
+  const dot = nav.querySelector(".nav-live-dot");
+  if (dot) dot.hidden = !live;
+  const stage = $("#nav-construction-stage");
+  if (stage) {
+    stage.textContent = live
+      ? (run ? liveStageLabel(run) : "Processing locally")
+      : "Watch your capture take shape";
+  }
+  nav.title = live
+    ? `${run?.title || displayName(job?.run || run?.name || "Capture")} · live construction`
+    : "Live construction";
+}
+
+async function refreshLiveJobFromApi() {
+  try {
+    const listing = await api("/api/construction");
+    const job = (listing.jobs || []).find((item) => item.state === "running");
+    updateLiveJobChip(job || null);
+  } catch {
+    updateLiveJobChip();
+  }
+}
+
+async function openSeparatedObject(runName, objectId) {
+  const run = state.runs.find((item) => item.name === runName);
+  let records = collectSeparatedObjects(run ? [run] : state.runs, studioContext());
+  if (!records.length) {
+    try {
+      const detail = await api(`/api/runs/${encodeURIComponent(runName)}`);
+      records = collectSeparatedObjects([detail], studioContext());
+    } catch (err) {
+      showFlash(err);
+      return;
+    }
+  }
+  const item = records.find((entry) => entry.object_id === objectId) || records[0];
+  if (!item) {
+    showFlash(new Error("That object is no longer available."));
+    return;
+  }
+  state.view = "object";
+  state.libraryKind = "object";
+  state.selectedObject = item;
+  document.body.classList.remove("run-workspace-active", "construction-active");
+  setNav("objects");
+  applySidebar();
+  renderSeparatedObject(item, studioContext());
 }
 
 async function switchView(name) {
@@ -2110,16 +2445,23 @@ async function switchView(name) {
   document.body.classList.toggle('construction-active', name === 'construction');
   stopLivePoll();
   document.body.classList.remove("run-workspace-active");
+  state.selectedObject = null;
   state.view = name;
+  if (name === "runs") state.libraryKind = "scene";
+  if (name === "objects") state.libraryKind = "object";
   setNav(name);
+  applySidebar();
   showFlash(null);
   if (name === "create") {
     renderCreate();
   } else if (name === "runs") {
     await loadRuns(false);
     renderRunsList();
+  } else if (name === "objects") {
+    await loadRuns(false);
+    renderObjectLibrary(studioContext());
   } else if (name === "construction") {
-    viewEl.innerHTML = '<iframe class="construction-frame" src="/static/construction.html" title="Live reconstruction workspace" allow="fullscreen"></iframe>';
+    loadConstructionFrame();
   } else if (name === "doctor") {
     if (!state.doctor) await loadHealth();
     renderDoctor();
@@ -2141,7 +2483,9 @@ async function loadRuns(forceRender) {
     const data = await api("/api/runs");
     state.runs = data.runs || [];
     showFlash(null);
-    if (forceRender || state.view === "runs") renderRunsList();
+    updateLiveJobChip();
+    if (forceRender && state.view === "objects") renderObjectLibrary(studioContext());
+    else if (forceRender || state.view === "runs") renderRunsList();
   } catch (err) {
     showFlash(err);
   }
@@ -2149,20 +2493,39 @@ async function loadRuns(forceRender) {
 
 function bindNav() {
   document.querySelectorAll("#nav button").forEach((btn) => {
-    btn.addEventListener("click", () => switchView(btn.dataset.view));
+    btn.addEventListener("click", () => {
+      if (btn.dataset.library) state.libraryKind = btn.dataset.library;
+      switchView(btn.dataset.view);
+    });
   });
 }
 
 /* ---------- boot ---------- */
 
 function studioContext() {
-  return { state, viewEl, displayName, fmt, fmtBytes, openRun, switchView, loadRuns, startObjectSeparation };
+  return {
+    state,
+    viewEl,
+    displayName,
+    fmt,
+    fmtBytes,
+    openRun,
+    switchView,
+    loadRuns,
+    startObjectSeparation,
+    startObjectMesh,
+    controlRun,
+    recoveryState,
+    openSeparatedObject,
+    applySidebar,
+  };
 }
 
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && state.presenting) {
     state.presenting = false;
     document.body.classList.remove('presentation-mode');
+    applySidebar();
     const button = $('#studio-present');
     if (button) { button.textContent = 'Present'; button.setAttribute('aria-pressed', 'false'); }
   }
@@ -2172,9 +2535,14 @@ window.addEventListener('beforeunload', (event) => {
 });
 
 state.advanced = loadMode();
+state.sidebarCollapsed = loadSidebar();
 bindModeToggle();
+bindSidebar();
 applyModeChrome();
 bindNav();
 loadHealth();
 const initialView = new URLSearchParams(location.search).get("view");
-switchView(["create", "construction"].includes(initialView) ? initialView : "runs");
+const initialKind = new URLSearchParams(location.search).get("library");
+if (initialKind === "object") state.libraryKind = "object";
+switchView(["create", "construction", "objects"].includes(initialView) ? initialView : (state.libraryKind === "object" ? "objects" : "runs"));
+setInterval(() => { if (!document.hidden) refreshLiveJobFromApi(); }, 8000);

@@ -143,7 +143,8 @@ def _run(
     with (nullcontext(progress) if progress else Progress(work, "sfm")) as progress:
         progress.update(substage=args[0], message="Starting " + args[0],
                         count=None, total=None, unit=None,
-                        preview_error="This COLMAP version does not expose mapper snapshots" if mapper and not options else None)
+                        preview_error=("Live geometry previews are disabled for this run" if os.environ.get("VITRINE_LIVE_PREVIEWS", "1") == "0"
+                                       else "COLMAP mapper snapshot discovery failed or snapshots are unsupported") if mapper and not options else None)
         monitor = MapperSnapshots(work, image, progress) if options else None
         tail = deque(maxlen=15)
         result = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -228,11 +229,12 @@ def run_sfm(
     image: str = DEFAULT_IMAGE,
     use_gpu: bool | None = None,
     camera_model: str = "OPENCV",
+    matching: str = "auto",
 ) -> SfmResult:
     from .construction import Progress
     with Progress(work_dir, "sfm") as observer:
         return _run_sfm(images_dir, work_dir, max_image_size=max_image_size,
-                        image=image, use_gpu=use_gpu, camera_model=camera_model, observer=observer)
+                        image=image, use_gpu=use_gpu, camera_model=camera_model, observer=observer, matching=matching)
 
 
 def _run_sfm(
@@ -244,6 +246,7 @@ def _run_sfm(
     use_gpu: bool | None = None,
     camera_model: str = "OPENCV",
     observer=None,
+    matching: str = "auto",
 ) -> SfmResult:
     """Full SfM: features → matching → mapping → bundle adjustment → text model.
 
@@ -304,7 +307,9 @@ def _run_sfm(
         mounts=mounts, image=image, use_gpu=use_gpu, timeout=7200, log_path=log_path,
     )
 
-    if n_images <= EXHAUSTIVE_LIMIT:
+    if matching not in {"auto", "exhaustive", "sequential"}:
+        raise ValueError(f"Unknown matching mode: {matching}")
+    if matching == "exhaustive" or (matching == "auto" and n_images <= EXHAUSTIVE_LIMIT):
         logger.info("exhaustive matching (%d images) — best loop closure for interiors", n_images)
         match_args = [
             "exhaustive_matcher",

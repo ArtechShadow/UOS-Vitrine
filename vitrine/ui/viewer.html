@@ -143,6 +143,7 @@
   <strong id="title">Explore in 3D</strong>
   <span class="muted" id="meta">Preparing the model…</span>
   <a id="download-master" download>Download full-quality PLY</a>
+  <a id="detail-mode" style="display:block;margin-top:6px"></a>
   <div class="controls">
     <div><b>Drag</b> to look around</div>
     <div><b>Scroll</b> to move closer or farther</div>
@@ -181,6 +182,13 @@ const splatUrl = new URL(`/files/${encodeURIComponent(run)}/${scenePath.split('/
 const plyPath = (objectScene || experimentScene) ? scenePath.replace(/\.splat$/, '.ply') : 'model/scene.ply';
 const plyUrl = new URL(`/files/${encodeURIComponent(run)}/${plyPath.split('/').map(encodeURIComponent).join('/')}`, location.origin).href;
 document.getElementById('download-master').href = plyUrl;
+const detailedShading = query.get('detail') === '1';
+const detailLink = document.getElementById('detail-mode');
+const detailUrl = new URL(location.href);
+if (detailedShading) detailUrl.searchParams.delete('detail');
+else detailUrl.searchParams.set('detail', '1');
+detailLink.href = detailUrl.href;
+detailLink.textContent = detailedShading ? 'Switch to lightweight view' : 'Try detailed shading';
 
 function prettyName(name) {
   return String(name || 'Archived space')
@@ -198,6 +206,7 @@ const root = document.getElementById('root');
 let viewpoints = [];
 let activeView = 0;
 let resetCamera = null;
+let groundUp = null;
 document.getElementById('reset-view').onclick = () => resetCamera?.();
 document.getElementById('viewpoint').onchange = (event) => { activeView = Number(event.target.value); resetCamera?.(); };
 document.getElementById('toggle-info').onclick = (event) => {
@@ -213,7 +222,7 @@ function bindCamera(camera, controls, frame) {
   resetCamera = () => {
     const pose = viewpoints[activeView];
     camera.position.fromArray(pose?.position || [frame.cx,frame.cy-frame.radius*.2,frame.cz+frame.radius*(objectScene?3.5:1.35)]);
-    camera.up.fromArray(pose?.up || [0,-1,0]);
+    camera.up.fromArray(groundUp || pose?.up || [0,-1,0]);
     const target = pose?.lookAt || [frame.cx,frame.cy,frame.cz];
     camera.fov = pose?.verticalFov || 55;
     camera.updateProjectionMatrix();
@@ -284,10 +293,10 @@ function frameFromSplat(buf) {
   return { n, cx, cy, cz, radius, bytes: buf.byteLength };
 }
 
-async function tryGaussianViewer(frame, sceneUrl) {
+async function tryGaussianViewer(frame, sceneUrl, format = GaussianSplats3D.SceneFormat.Splat, shDegree = 0) {
   const viewer = new GaussianSplats3D.Viewer({
     rootElement: root,
-    cameraUp: viewpoints[activeView]?.up || [0, -1, 0],
+    cameraUp: groundUp || viewpoints[activeView]?.up || [0, -1, 0],
     initialCameraPosition: viewpoints[activeView]?.position || [
       frame.cx,
       frame.cy - frame.radius * 0.2,
@@ -298,33 +307,38 @@ async function tryGaussianViewer(frame, sceneUrl) {
     gpuAcceleratedSort: false,
     integerBasedSort: false,
     antialiased: true,
-    // Bundled WebGL shader supports degree 2; the PLY master retains SH3.
-    sphericalHarmonicsDegree: 2,
+    // Open the bounded browser derivative; retain full SH3 in the PLY download.
+    sphericalHarmonicsDegree: shDegree,
     halfPrecisionCovariancesOnGPU: false,
   });
 
   meta.textContent = 'Opening the three-dimensional model…';
   setStatus('Opening model');
   setProgress(0.75);
-  await viewer.addSplatScene(sceneUrl, {
-    format: GaussianSplats3D.SceneFormat.Ply,
-    splatAlphaRemovalThreshold: 0,
-    sphericalHarmonicsDegree: 2,
-    showLoadingUI: false,
-    progressiveLoad: false,
-    onProgress: (pct) => {
-      if (typeof pct === 'number') {
-        setProgress(0.75 + 0.24 * Math.min(1, pct / 100));
-        meta.textContent = `Opening the model… ${pct.toFixed?.(0) ?? pct}%`;
-      }
-    },
-  });
+  try {
+    await viewer.addSplatScene(sceneUrl, {
+      format,
+      splatAlphaRemovalThreshold: 0,
+      sphericalHarmonicsDegree: shDegree,
+      showLoadingUI: false,
+      progressiveLoad: false,
+      onProgress: (pct) => {
+        if (typeof pct === 'number') {
+          setProgress(0.75 + 0.24 * Math.min(1, pct / 100));
+          meta.textContent = `Opening the model… ${pct.toFixed?.(0) ?? pct}%`;
+        }
+      },
+    });
+  } catch (error) {
+    await viewer.dispose();
+    throw error;
+  }
   viewer.start();
   bindCamera(viewer.camera, viewer.controls, frame);
   setProgress(1);
   setStatus('Ready to explore', true);
   meta.textContent =
-    `Full PLY geometry · SH2 browser shading · SH3 preserved in master download`;
+    `Interactive splat · SH${shDegree} browser shading · full SH3 in master download`;
   return viewer;
 }
 
@@ -343,6 +357,7 @@ async function pointCloudFallback(buf, frame) {
   renderer.setSize(root.clientWidth, root.clientHeight, false);
   root.appendChild(renderer.domElement);
 
+  camera.up.fromArray(groundUp || viewpoints[activeView]?.up || [0,-1,0]);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.target.set(frame.cx, frame.cy, frame.cz);
@@ -410,6 +425,14 @@ async function pointCloudFallback(buf, frame) {
 }
 
 async function main() {
+  if (!objectScene) {
+    try {
+      const response = await fetch(`/files/${encodeURIComponent(run)}/view-orientation.json`);
+      const orientation = response.ok ? await response.json() : null;
+      const up = orientation?.up;
+      if (Array.isArray(up) && up.length === 3 && up.every(Number.isFinite) && Math.hypot(...up) > .001) groundUp = new THREE.Vector3(...up).normalize().toArray();
+    } catch { /* Older captures retain their recorded orientation. */ }
+  }
   try {
     const cameraPath = (objectScene || experimentScene) ? scenePath.replace(/[^/]+$/, 'viewer-cameras.json') : 'model/viewer-cameras.json';
     const response = await fetch(new URL(`/files/${encodeURIComponent(run)}/${cameraPath}`,location.origin));
@@ -468,9 +491,27 @@ async function main() {
   const blobUrl = URL.createObjectURL(
     new Blob([buf], { type: 'application/octet-stream' })
   );
+  let detailedBlobUrl = null;
 
   try {
-    await tryGaussianViewer(frame, plyUrl);
+    if (detailedShading) {
+      const preparedUrl = splatUrl.replace(/\.splat$/, '.ksplat');
+      const response = await fetch(preparedUrl);
+      if (response.ok) {
+        meta.textContent = 'Loading prepared detailed shading…';
+        detailedBlobUrl = URL.createObjectURL(await response.blob());
+        try {
+          await tryGaussianViewer(frame, detailedBlobUrl, GaussianSplats3D.SceneFormat.KSplat, 2);
+        } catch (error) {
+          console.warn('Detailed shading unavailable; opening lightweight splat', error);
+          await tryGaussianViewer(frame, blobUrl);
+          errEl.textContent = 'Detailed shading could not open; the lightweight splat is shown.';
+        }
+      } else {
+        await tryGaussianViewer(frame, blobUrl);
+        errEl.textContent = 'This capture has no prepared detailed-shading file yet. Showing the lightweight splat.';
+      }
+    } else await tryGaussianViewer(frame, blobUrl);
   } catch (gsErr) {
     console.warn('GaussianSplats3D failed, using point-cloud fallback', gsErr);
     errEl.textContent = '';
@@ -479,7 +520,8 @@ async function main() {
     errEl.textContent =
       'Note: the full-quality renderer was unavailable on this browser, so a simplified point preview is shown instead.';
   } finally {
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    URL.revokeObjectURL(blobUrl);
+    if (detailedBlobUrl) URL.revokeObjectURL(detailedBlobUrl);
   }
 }
 

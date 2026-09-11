@@ -35,7 +35,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
+from .raw_io import RAW_SUFFIXES, open_image, raw_info, development_record
 
 from .frame_selection import (
     GLOBAL_FRAME_SAFETY_CAP,
@@ -55,7 +56,7 @@ try:
 except ImportError:  # pragma: no cover - optional dep until installed
     _HEIF_OK = False
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp", ".heic", ".heif"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp", ".heic", ".heif"} | RAW_SUFFIXES
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
 
 #: Frames per second to pull out of video before sharpness selection. Higher
@@ -134,26 +135,31 @@ def _exif_camera_label(path: Path) -> str:
     generally not be mixed with originals).
     """
     try:
-        with Image.open(path) as im:
-            exif = im.getexif()
-            if not exif:
-                return ""
-            make = str(exif.get(271, "")).strip()   # Make
-            model = str(exif.get(272, "")).strip()  # Model
+        if path.suffix.lower() in RAW_SUFFIXES:
+            _, exif = raw_info(path)
+        else:
+            with Image.open(path) as im:
+                exif = im.getexif()
+                if 34665 in exif:
+                    exif.get_ifd(34665)  # Resolve lazy metadata before the file closes.
+        if not exif:
+            return ""
+        make = str(exif.get(271, "")).strip()   # Make
+        model = str(exif.get(272, "")).strip()  # Model
 
-            # FocalLength (0x920A) lives in the Exif sub-IFD (0x8769), not the
-            # base IFD that getexif() returns — reading it off the top level
-            # always yields nothing.
-            focal_str = ""
-            try:
-                sub = exif.get_ifd(0x8769)
-                focal = sub.get(0x920A)
-                if focal:
-                    focal_str = f"@{float(focal):.1f}mm"
-            except (AttributeError, KeyError, TypeError, ValueError, ZeroDivisionError):
-                pass
+        # FocalLength (0x920A) lives in the Exif sub-IFD (0x8769), not the
+        # base IFD that getexif() returns — reading it off the top level
+        # always yields nothing.
+        focal_str = ""
+        try:
+            sub = exif.get_ifd(0x8769)
+            focal = sub.get(0x920A)
+            if focal:
+                focal_str = f"@{float(focal):.1f}mm"
+        except (AttributeError, KeyError, TypeError, ValueError, ZeroDivisionError):
+            pass
 
-            return f"{make} {model}{focal_str}".strip()
+        return f"{make} {model}{focal_str}".strip()
     except (OSError, ValueError):
         return ""
 
@@ -169,7 +175,11 @@ def sharpness(path: Path, working_long_edge: int = 800) -> float:
     """
     import cv2
 
-    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if path.suffix.lower() in RAW_SUFFIXES:
+        with open_image(path, preview=True) as image:
+            img = np.asarray(ImageOps.exif_transpose(image).convert("L"))
+    else:
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         return 0.0
     h, w = img.shape
@@ -276,10 +286,17 @@ def classify_sources(source_dir: Path, *, include: list[str] | None = None) -> l
 
     for path in candidates:
         try:
-            with Image.open(path) as im:
-                width, height = im.size
-        except (OSError, ValueError):
-            logger.warning("skipping unreadable image %s", path)
+            if path.suffix.lower() in RAW_SUFFIXES:
+                (width, height), exif = raw_info(path)
+                orientation = exif.get(274, 1)
+            else:
+                with Image.open(path) as im:
+                    width, height = im.size
+                    orientation = im.getexif().get(274, 1)
+            if orientation in (5, 6, 7, 8):
+                width, height = height, width
+        except (OSError, ValueError) as exc:
+            logger.warning("skipping unreadable image %s: %s", path, exc)
             continue
 
         label = _exif_camera_label(path)
@@ -301,6 +318,8 @@ def classify_sources(source_dir: Path, *, include: list[str] | None = None) -> l
             )
             groups[key] = group
         group.paths.append(path)
+        if path.suffix.lower() in RAW_SUFFIXES:
+            group.colour_processing["raw_development"] = development_record()
 
     # Keep the familiar folder name for the common one-group case.  Once a
     # folder contains multiple resolutions or EXIF camera labels, make each
@@ -622,12 +641,24 @@ def stage_group(
     dest.mkdir(parents=True, exist_ok=True)
 
     written = 0
+    # Case-fold for the Windows destination even when preparing on Linux.
+    reserved = {p.name.casefold() for p in dest.iterdir()}
     for path in paths:
-        target = dest / f"{path.stem}.jpg"
+        name = f"{path.stem}.jpg"
+        suffix = 1
+        while name.casefold() in reserved:
+            name = f"{path.stem}__{suffix}.jpg"
+            suffix += 1
+        reserved.add(name.casefold())
+        target = dest / name
         try:
-            with Image.open(path) as im:
-                exif = im.info.get("exif")
+            with open_image(path) as im:
+                # Normalise pixels and orientation together before COLMAP.
+                # Focal/camera EXIF survives; originals remain byte-identical.
                 icc = im.info.get("icc_profile")
+                im = ImageOps.exif_transpose(im)
+                exif = im.getexif()
+                exif[274] = 1
                 im = im.convert("RGB")
                 width, height = im.size
                 if max(width, height) > long_edge:
@@ -638,7 +669,7 @@ def stage_group(
                     )
                 save_kwargs: dict[str, object] = {"quality": 95, "subsampling": 0}
                 if exif:
-                    save_kwargs["exif"] = exif
+                    save_kwargs["exif"] = exif.tobytes()
                 if icc:
                     save_kwargs["icc_profile"] = icc
                 im.save(target, "JPEG", **save_kwargs)

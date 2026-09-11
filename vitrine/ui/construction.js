@@ -5,8 +5,32 @@ import {paintEvidence} from './construction-progress.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
+const liveOnly = !params.has('embedded');
+const hosted = params.has('hosted') || window.parent !== window;
+const advancedView = params.has('advanced');
+if (hosted) document.body.classList.add('construction-hosted');
 if (params.has('embedded')) document.body.classList.add('construction-embedded');
-const stages = [['preflight','Check readiness'],['ingest','Prepare images'],['sfm','Find camera positions'],['train','Build splat'],['evaluate','Check quality'],['export','Prepare viewer'],['package','Package'],['viewer','Viewer']];
+document.body.classList.toggle('mode-advanced', advancedView);
+const SIMPLE_STAGES = [['preflight','Check computer'],['ingest','Prepare photographs'],['sfm','Find cameras'],['train','Build 3D model'],['evaluate','Check quality'],['viewer','Viewer']];
+const ADVANCED_STAGES = [['preflight','Check readiness'],['ingest','Prepare images'],['sfm','Find camera positions'],['train','Build splat'],['evaluate','Check quality'],['viewer','Viewer']];
+const idlePanel = document.createElement('section');
+idlePanel.className = 'studio-empty';
+idlePanel.hidden = true;
+idlePanel.innerHTML = '<h2>No run is currently processing.</h2><p>Start or resume a capture to watch its construction here.</p><a href="/" target="_top">Open capture library</a>';
+document.querySelector('.build-header').after(idlePanel);
+if (params.has('embedded')) {
+  window.addEventListener('message', event => {
+    if (event.origin !== location.origin || event.source !== parent) return;
+    if (event.data?.type === 'vitrine:viewer-height' && Number.isFinite(event.data.height)) {
+      document.documentElement.style.setProperty('--embedded-viewer-height', `${Math.max(320, Math.min(1100, event.data.height))}px`);
+    }
+  });
+  new ResizeObserver(() => {
+    parent.postMessage({type:'vitrine:construction-height', height:Math.ceil(document.body.getBoundingClientRect().height)}, location.origin);
+  }).observe(document.body);
+  parent.postMessage({type:'vitrine:construction-ready'}, location.origin);
+}
+const stages = advancedView ? ADVANCED_STAGES : SIMPLE_STAGES;
 document.querySelector('.build-stages').innerHTML = stages.map(([id,title],i)=>`<li data-stage="${id}"><button type="button"><b>0${i+1}</b>${title}</button></li>`).join('');
 let inspectedStage = null;
 document.querySelectorAll('.build-stages [data-stage]').forEach(item => item.querySelector('button').onclick = () => {
@@ -25,11 +49,13 @@ let data = null, loadedId = null, loading = false, playback = null, generation =
 let renderer, camera, controls, scene, splats, cloud, frustums, bounds, fitted = false, splatCount = 0;
 let renderFailed = false, compare = false;
 let captureUp = null, captureBack = null;
+let groundUp = null, orientationLoadedFor = null;
 let completedViewerUrl = null;
 let sequentialProgress = null;
 let connectionInterrupted = false;
 let userNavigated = false;
-let captureViews = [], selectedCapture = 0;
+let captureViews = [], selectedCapture = -1;
+let previousCameraNames = new Set();
 const surfaceSection=document.createElement('section');
 surfaceSection.hidden=true;document.querySelector('.build-info').append(surfaceSection);
 const shownSnapshots = () => (data?.snapshots || []).filter(s => inspectedStage === 'sfm' ? s.kind === 'sparse' : inspectedStage === 'train' ? s.kind === 'splat' || s.kind === 'render' : true);
@@ -54,7 +80,7 @@ function initRenderer() {
     const theme = () => {renderer.setClearColor(getComputedStyle(document.documentElement).getPropertyValue('--canvas').trim());};
     theme();window.addEventListener('themechange',theme);
     renderer.setAnimationLoop(()=>{
-      if (document.hidden || stopped || inspectedStage === 'viewer') return;
+      if (document.hidden || stopped || document.body.classList.contains('viewing-final')) return;
       controls.update();
       if (splats && splatCount) {splats.update();splats.render();}
       else renderer.render(scene,camera);
@@ -93,8 +119,11 @@ function reset() {
   const radius=Math.max(bounds.radius,.001);
   const recorded = captureViews[selectedCapture];
   const matrix = recorded?.camera_to_world;
-  const up = matrix ? new THREE.Vector3(-matrix[0][1],-matrix[1][1],-matrix[2][1]).normalize() : captureUp || new THREE.Vector3(0,-1,0);
-  const back = captureBack || new THREE.Vector3(0,0,1);
+  const up = groundUp || (matrix ? new THREE.Vector3(-matrix[0][1],-matrix[1][1],-matrix[2][1]).normalize() : captureUp || new THREE.Vector3(0,-1,0));
+  const back = (captureBack || new THREE.Vector3(0,0,1)).clone();
+  back.addScaledVector(up, -back.dot(up));
+  if (back.lengthSq() < 1e-8) back.set(1,0,0).addScaledVector(up,-up.x);
+  back.normalize();
   // OrbitControls caches its up-axis at construction time.
   if (camera.up.distanceToSquared(up) > 1e-8) {
     controls.dispose(); camera.up.copy(up);
@@ -162,8 +191,10 @@ function makeSparse(payload) {
     const lines=[];
     corners.forEach((v,i)=>{lines.push(centre,v,v,corners[(i+1)%4]);});
     const geo=new THREE.BufferGeometry().setFromPoints(lines);
-    cameraGroup.add(new THREE.LineSegments(geo,new THREE.LineBasicMaterial({color:0xf18a46})));
+    const newlyPlaced = previousCameraNames.size > 0 && !previousCameraNames.has(view.name);
+    cameraGroup.add(new THREE.LineSegments(geo,new THREE.LineBasicMaterial({color:newlyPlaced ? 0x64e6c4 : 0xf18a46})));
   }
+  previousCameraNames = new Set(payload.cameras.map(view => view.name));
   cameraGroup.visible=$('cameras').getAttribute('aria-pressed')==='true';
   return {group,cameraGroup};
 }
@@ -222,7 +253,7 @@ async function loadSnapshot(shot) {
     }
     if (ticket!==generation) return;
     loadedId=shot.id;$('build-empty').hidden=true;
-    $('preview-label').textContent=shot.kind==='sparse'?'Registered cameras · sparse geometry':'Reduced-detail splat · up to 250,000 Gaussians';
+    $('preview-label').textContent=shot.kind==='sparse'?'3D camera map · orange: placed cameras · mint: newly added':'Reduced-detail splat · up to 250,000 Gaussians';
     $('notice').textContent='';
   } catch (error) {
     $('notice').textContent='Preview could not be loaded. Keeping the previous view and retrying. '+error.message;
@@ -252,7 +283,18 @@ function paint() {
     document.getElementById('cancel-pipeline').disabled = !!data.cancel_requested;
   }
   if (!data) return;
-  const displayedStage = inspectedStage || data.stage;
+  const currentStage = ['export','package'].includes(data.stage) || (data.state === 'complete' && data.final_url) ? 'viewer' : data.stage;
+  const displayedStage = inspectedStage || currentStage;
+  const viewingFinal = displayedStage === 'viewer';
+  document.body.classList.toggle('viewing-final', viewingFinal);
+  for (const id of ['replay','reset','capture-view','cameras','compare']) {
+    $(id).hidden = viewingFinal || (id === 'capture-view' && !captureViews.length);
+  }
+  document.querySelector('.build-timeline').hidden = viewingFinal;
+  $('follow').hidden = viewingFinal && data.state !== 'running';
+  $('fullscreen').hidden = viewingFinal && !!data.final_url;
+  document.querySelector('.build-layout > main > .build-toolbar').hidden = viewingFinal && !!data.final_url && data.state !== 'running';
+  $('build-counts').hidden = !!inspectedStage && inspectedStage !== currentStage;
   surfaceSection.hidden=!data.postprocessing?.length && !data.surface_assets?.length;
   surfaceSection.replaceChildren();
   if(!surfaceSection.hidden){
@@ -276,24 +318,29 @@ function paint() {
   $('geometry').style.visibility = shot ? 'visible' : 'hidden';
   $('build-empty').hidden = !!shot;
   document.querySelectorAll('[data-stage]').forEach(el=>{
-    const active=el.dataset.stage===data.stage && data.state==='running';
+    const active=el.dataset.stage===currentStage && data.state==='running';
     el.classList.toggle('active',active);el.classList.toggle('done',el.dataset.stage==='viewer' ? !!data.final_url : !!data.done?.[el.dataset.stage]);
     if(active)el.setAttribute('aria-current','step');else el.removeAttribute('aria-current');
   });
-  $('stage-title').textContent=stages.find(s=>s[0]===data.stage)?.[1] || 'Construction';
+  $('stage-title').textContent=stages.find(s=>s[0]===displayedStage)?.[1] || 'Construction';
   $('state-label').textContent=({running:'Processing locally',complete:'Processing finished',failed:'Needs attention',unknown:'Status unknown · connection may be lost'})[data.state] || 'Local workspace';
   const descriptions={ingest:'Preparing photographs and video frames for reconstruction.',sfm:'Finding overlapping views and recovering camera positions.',train:'Refining the splat from the registered photographs.',evaluate:'Measuring how the reconstruction matches photographed views.',package:'Collecting the model and preservation records.'};
-  const substeps = {feature_extractor:'Detecting distinctive image details for camera matching.',sequential_matcher:'Matching overlapping video frames.',exhaustive_matcher:'Comparing image pairs to find shared details.',mapper:'Recovering camera positions and triangulating the room. Camera markers and points appear as COLMAP publishes them.',model_converter:'Saving calibrated cameras and points in the archive format.'};
+  const substeps = advancedView
+    ? {feature_extractor:'Detecting distinctive image details for camera matching.',sequential_matcher:'Matching overlapping video frames.',exhaustive_matcher:'Comparing image pairs to find shared details.',mapper:'Recovering camera positions and triangulating the room. Camera markers and points appear as COLMAP publishes them.',model_converter:'Saving calibrated cameras and points in the archive format.'}
+    : {feature_extractor:'Finding distinctive details in each photograph.',sequential_matcher:'Matching overlapping video frames.',exhaustive_matcher:'Comparing photographs to find shared details.',mapper:'Placing cameras in the room. Markers appear as they are found.',model_converter:'Saving the camera map for the archive.'};
   $('stage-copy').textContent=['failed','cancelled'].includes(data.state) ? (data.error || 'Processing stopped. Completed stages are retained; resume when ready.') : data.historical?'This capture predates recorded construction previews. Its completed model is available below.':substeps[data.substage] || descriptions[data.stage] || ({preflight:'Checking inputs and this computer before reconstruction.',export:'Preparing the interactive viewing file.',cleanup:'Saving a separate cleanup candidate.'})[data.stage];
-  $('build-progress').hidden=data.state!=='running';
+  if (inspectedStage && inspectedStage !== currentStage) {
+    $('stage-copy').textContent = descriptions[inspectedStage] || 'Checking inputs and this computer before reconstruction.';
+  }
+  $('build-progress').hidden=data.state!=='running' || (!!inspectedStage && inspectedStage !== currentStage);
   const count=data.stage==='train'?data.step:data.count;
   if(Number.isFinite(data.total)&&Number.isFinite(count)&&data.total>0){$('build-progress').max=data.total;$('build-progress').value=count;}else $('build-progress').removeAttribute('value');
   const counts=[];
   if(data.pipeline?.created) counts.push(['Elapsed',number(Math.max(0,((data.pipeline.pid?Date.now()/1000:data.pipeline.updated)-data.pipeline.created)/60))+' min']);
-  if(Number.isFinite(count)) counts.push([data.stage==='train'?'Training step':data.unit||'Processed',number(count)+(data.total?' / '+number(data.total):'')]);
-  if(Number.isFinite(data.registered))counts.push(['Registered views',number(data.registered)]);
-  if(Number.isFinite(data.points))counts.push(['Sparse points',number(data.points)]);
-  if(Number.isFinite(data.n_gaussians))counts.push(['Training Gaussians',number(data.n_gaussians)]);
+  if(Number.isFinite(count)) counts.push([data.stage==='train'?(advancedView?'Training step':'Build step'):data.unit||'Processed',number(count)+(data.total?' / '+number(data.total):'')]);
+  if(advancedView && Number.isFinite(data.registered))counts.push(['Registered views',number(data.registered)]);
+  if(advancedView && Number.isFinite(data.points))counts.push(['Sparse points',number(data.points)]);
+  if(advancedView && Number.isFinite(data.n_gaussians))counts.push(['Training Gaussians',number(data.n_gaussians)]);
   if(Number.isFinite(data.eta_seconds)&&data.state==='running'&&data.stage==='train')counts.push(['Estimated remaining',number(Math.ceil(data.eta_seconds/60))+' min']);
   $('build-counts').replaceChildren(...counts.flatMap(([key,value])=>{const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=key;dd.textContent=value;return[dt,dd];}));
   $('heartbeat').textContent=data.heartbeat?'Last activity '+new Date(data.heartbeat*1000).toLocaleTimeString():'';
@@ -303,7 +350,7 @@ function paint() {
   $('timeline-count').textContent=shots.length+' snapshots';$('replay').disabled=shots.length<2;
   $('follow').setAttribute('aria-pressed',String(following));$('timeline-mode').textContent=inspectedStage?'Stage review':following?'Live':playback?'Replay':'Recorded';
   $('compare').disabled=!data.images?.length;
-  $('caption').textContent=shot?`${shot.kind!=='sparse'?'Training step '+number(shot.step):number(shot.registered)+' registered views'} · ${new Date((shot.captured||shot.created)*1000).toLocaleTimeString()} · recorded snapshot`: 'No geometry snapshots recorded yet.';
+  $('caption').textContent=shot?(advancedView?`${shot.kind!=='sparse'?'Training step '+number(shot.step):number(shot.registered)+' registered views'} · ${new Date((shot.captured||shot.created)*1000).toLocaleTimeString()} · recorded snapshot`:`Latest recorded preview · ${new Date((shot.captured||shot.created)*1000).toLocaleTimeString()}`): 'No geometry snapshots recorded yet.';
   $('final-viewer').hidden=!data.final_url;if(data.final_url)$('final-viewer').href=data.final_url;
   if (displayedStage === 'viewer') {
     $('stage-title').textContent = 'Splat viewer';
@@ -314,13 +361,32 @@ function paint() {
     $('empty-title').textContent=displayedStage==='sfm'?'Finding how the photographs connect.':data.state==='running'?'Your space is being reconstructed.':data.historical?'Your finished space is ready.':'A space, taking shape.';
     $('empty-copy').textContent=displayedStage==='sfm' ? (substeps[data.substage] || 'Recorded camera positions and sparse points appear here when available.') : 'Recorded splat previews will appear as training progresses.';
   }
-  if(compare||renderFailed)showComparison(true);
-  loadSnapshot(shot);
+  if (!viewingFinal) {
+    if(compare||renderFailed)showComparison(true);
+    loadSnapshot(shot);
+  }
 }
 function stopReplay(){clearInterval(playback);playback=null;$('replay').textContent='Replay';}
 $('follow').onclick=()=>{stopReplay();following=true;inspectedStage=null;paint();};
+const INFO_KEY = 'vitrine.ui.constructionInfo';
+let infoCollapsed = false;
+try { infoCollapsed = localStorage.getItem(INFO_KEY) === 'collapsed'; } catch {}
+const applyInfo = () => {
+  document.body.classList.toggle('info-collapsed', infoCollapsed);
+  const btn = $('toggle-info');
+  if (!btn) return;
+  btn.setAttribute('aria-expanded', String(!infoCollapsed));
+  btn.textContent = infoCollapsed ? 'Show details' : 'Hide details';
+  btn.title = infoCollapsed ? 'Show details' : 'Hide details';
+};
+applyInfo();
+$('toggle-info')?.addEventListener('click', () => {
+  infoCollapsed = !infoCollapsed;
+  try { localStorage.setItem(INFO_KEY, infoCollapsed ? 'collapsed' : 'open'); } catch {}
+  applyInfo();
+});
 const pipelineControls = document.createElement('div');
-pipelineControls.id = 'pipeline-controls'; pipelineControls.className = 'build-toolbar';
+pipelineControls.id = 'pipeline-controls'; pipelineControls.className = 'build-toolbar build-advanced-only';
 for (const [action,label] of [['cancel','Cancel build'],['resume','Resume build'],['open-folder','Open output folder']]) {
   const button = document.createElement('button'); button.textContent=label; button.id=action+'-pipeline';
   button.hidden=action!=='open-folder';
@@ -346,21 +412,47 @@ $('capture-view').onchange=()=>{selectedCapture=Number($('capture-view').value);
 $('cameras').onclick=()=>{const visible=$('cameras').getAttribute('aria-pressed')!=='true';$('cameras').setAttribute('aria-pressed',String(visible));if(frustums)frustums.visible=visible;};
 $('compare').onclick=()=>showComparison(!compare);
 $('fullscreen').onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await $('build-screen').requestFullscreen();}catch{$('notice').textContent='Fullscreen is unavailable in this browser.';}};
-$('build-job').onchange=()=>{const value=$('build-job').value.split('/');const query=new URLSearchParams({run:value[0]});if(value[1]==='experiments')query.set('experiment',value[2]);location.search=query.toString();};
+$('build-job').onchange=()=>{
+  const value=$('build-job').value.split('/');
+  const query=new URLSearchParams(location.search);
+  query.set('run', value[0]);
+  if(value[1]==='experiments') query.set('experiment',value[2]); else query.delete('experiment');
+  location.search=query.toString();
+};
 async function poll(){
   if(stopped)return;
   try {
     if(!params.has('embedded')){
       const listing=await fetchJSON('/api/construction');
-      const jobs=listing.jobs||[];
+      const jobs=(listing.jobs||[]).filter(job => job.state === 'running');
       $('build-job').replaceChildren(...jobs.map(job=>{const option=document.createElement('option');option.value=job.id;option.textContent=job.run+' · '+job.label;return option;}));
-      if(!jobs.length){const option=document.createElement('option');option.textContent='No builds yet';option.value='';$('build-job').append(option);}
+      if(!jobs.length){const option=document.createElement('option');option.textContent='No active run';option.value='';$('build-job').append(option);}
       $('build-job').disabled=!jobs.length;
-      if(!run&&jobs.length){run=jobs[0].run;experiment=jobs[0].id.split('/')[1]==='experiments'?jobs[0].label:null;}
+      const jobWrap = $('build-job').parentElement;
+      if (jobWrap) jobWrap.hidden = !advancedView && jobs.length < 2;
+      const active = jobs.find(job => job.run === run) || jobs[0];
+      const nextRun = active?.run || null;
+      if (run !== nextRun) {
+        generation++; stopReplay(); data=null; selectedId=null; loadedId=null;
+        following=true; inspectedStage=null; fitted=false; completedViewerUrl=null;
+        disposeObject(cloud); cloud=null; disposeObject(frustums); frustums=null;
+        splats?.dispose(); splats=null;
+      }
+      run=nextRun; experiment=null;
+      idlePanel.hidden=!!run;
+      document.querySelector('.build-layout').hidden=!run;
+      document.querySelector('.build-stages').hidden=!run;
       $('build-job').value=run?(experiment?`${run}/experiments/${experiment}`:`${run}/model`):'';
     }
     if(run){
       data=await fetchJSON(`/api/runs/${encodeURIComponent(run)}/construction`+(experiment?'?experiment='+encodeURIComponent(experiment):''));
+      if (liveOnly && data.state !== 'running') {
+        idlePanel.hidden=false;
+        document.querySelector('.build-layout').hidden=true;
+        document.querySelector('.build-stages').hidden=true;
+        setTimeout(poll,2000);
+        return;
+      }
       if (connectionInterrupted) {
         $('notice').textContent = '';
         connectionInterrupted = false;
@@ -385,6 +477,14 @@ async function poll(){
       if (!experiment) {
         const root = `/files/${encodeURIComponent(run)}/`;
         const readOptional = async path => {try {const response=await fetch(root+path, {cache:'no-store'});return response.ok ? await response.json() : null;} catch {return null;}};
+        if (orientationLoadedFor !== run) {
+          const orientation = await readOptional('view-orientation.json');
+          const up = orientation?.up;
+          groundUp = Array.isArray(up) && up.length === 3 && up.every(Number.isFinite) && Math.hypot(...up) > .001
+            ? new THREE.Vector3(...up).normalize() : null;
+          orientationLoadedFor = run;
+          fitted = false;
+        }
         if (!data.selection) {
           data.selection = await readOptional('ingest/selection.json');
           for (const record of data.selection?.records || []) if (/^[0-9a-f]{32}\.jpg$/.test(record.thumbnail || '')) record.url = root + 'ingest/selection-thumbnails/' + record.thumbnail;

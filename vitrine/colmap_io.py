@@ -91,7 +91,7 @@ class Camera:
 
     @property
     def has_distortion(self) -> bool:
-        return any(abs(self.params.get(p, 0.0)) > 1e-8 for p in ("k1", "k2", "k3", "p1", "p2"))
+        return any(abs(self.params.get(p, 0.0)) > 1e-8 for p in ("k1", "k2", "k3", "k4", "k5", "k6", "p1", "p2", "omega", "sx1", "sy1"))
 
 
 @dataclass(frozen=True)

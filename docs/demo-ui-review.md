@@ -4,6 +4,15 @@ The local dashboard now keeps Vitrine's dark, warm-orange branding while
 presenting a direct Images → 3D splat → Objects journey. This is the preservation
 pipeline dashboard, not a change to the separate Capture product.
 
+Desktop shell follow-up: the sidebar collapses to an icon rail (saved in
+`vitrine.ui.sidebar`) and auto-collapses on Live construction. Simple mode keeps
+Create, Library (Scene / Object) and Live construction; Quality guide and
+Workstation appear only in Advanced view. Object capture is a first-class
+library page, including items separated from scenes. Appearance lives once in
+the shell — construction no longer repeats it when hosted in the dashboard.
+An XR Lab watermark in the bottom-right shows the package version and, when
+the doctor payload includes it, the git branch.
+
 ## Delivered
 
 - Image-led capture library, search and ready filter; real titles and photographs.

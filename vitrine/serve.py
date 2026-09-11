@@ -340,6 +340,35 @@ def _parse_multipart_form(fp: Any, headers: Any) -> _MultipartForm:
 UI_DIR = Path(__file__).resolve().parent / "ui"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+
+def _git_identity() -> dict[str, str | None]:
+    """Current branch and short SHA for the dashboard watermark. Best-effort."""
+    def _run(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(PROJECT_ROOT), *args],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if result.returncode != 0:
+            return ""
+        return (result.stdout or "").strip()
+
+    branch = _run("rev-parse", "--abbrev-ref", "HEAD") or None
+    commit = _run("rev-parse", "--short", "HEAD") or None
+    identity = {"branch": branch, "commit": commit}
+    try:
+        (UI_DIR / "git-identity.json").write_text(
+            json.dumps(identity), encoding="utf-8"
+        )
+    except OSError:
+        pass
+    return identity
+
 # progress.json is rewritten every 500 training steps (see train.py). Even on
 # the 3060 Laptop (~500 ms/iter) that is roughly every four minutes. Anything
 # older than this is treated as an interrupted run, not live training — a
@@ -348,7 +377,7 @@ PROGRESS_FRESH_SECONDS = 10 * 60
 
 UPLOAD_SUFFIXES = {
     ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".bmp",
-    ".heic", ".heif", ".mp4", ".mov", ".m4v", ".avi", ".mkv",
+    ".heic", ".heif", ".arw", ".mp4", ".mov", ".m4v", ".avi", ".mkv",
 }
 _WINDOWS_DEVICE_NAMES = {
     "CON", "PRN", "AUX", "NUL",
@@ -392,13 +421,107 @@ def _pipeline_state(run_dir: Path) -> str | None:
 
 def _pid_is_running(pid: Any) -> bool:
     """Best-effort local process check used only to avoid duplicate resumes."""
-    if not isinstance(pid, int) or pid <= 0:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except (OSError, ProcessLookupError):
-        return False
-    return True
+    from .processes import process_alive
+    return process_alive(pid) is not False
+
+
+_PIPELINE_TERMINAL_STATES = frozenset({"complete", "completed", "failed", "cancelled"})
+
+
+def _worker_snapshot(
+    run_dir: Path,
+    process: subprocess.Popen | None = None,
+) -> dict[str, Any]:
+    """Return a conservative view of the dashboard worker's liveness.
+
+    ``pipeline.json`` survives a dashboard restart, while ``Popen`` handles do
+    not.  A persisted ``running`` state therefore cannot be shown as live until
+    its PID is still present.  A process that disappears before it writes a
+    terminal pipeline state is explicitly ``unknown``; no artefact is allowed
+    to turn that into a completed run.
+    """
+    record = _pipeline_record(run_dir) or {}
+    pipeline_state = record.get("state")
+    pid = record.get("pid")
+
+    if process is not None:
+        code = process.poll()
+        if code is None:
+            return {
+                "state": "running",
+                "running": True,
+                "stale": False,
+                "process_id": process.pid,
+                "returncode": None,
+            }
+        if code != 0:
+            return {
+                "state": "failed",
+                "running": False,
+                "stale": True,
+                "process_id": process.pid,
+                "returncode": code,
+                "error": f"Pipeline worker exited with code {code}.",
+            }
+        if pipeline_state in _PIPELINE_TERMINAL_STATES:
+            return {
+                "state": pipeline_state,
+                "running": False,
+                "stale": False,
+                "process_id": process.pid,
+                "returncode": code,
+            }
+        # A clean child exit without its durable terminal write is still an
+        # incomplete/unknown pipeline.  It may have been killed during save or
+        # packaging, so callers must offer recovery rather than completion.
+        return {
+            "state": "failed" if code else "unknown",
+            "running": False,
+            "stale": True,
+            "process_id": process.pid,
+            "returncode": code,
+            "error": (
+                f"Pipeline worker exited with code {code}."
+                if code
+                else "Pipeline worker exited before recording a terminal state."
+            ),
+        }
+
+    if pipeline_state in _PIPELINE_TERMINAL_STATES:
+        return {
+            "state": pipeline_state,
+            "running": False,
+            "stale": False,
+            "process_id": pid if isinstance(pid, int) else None,
+            "returncode": None,
+        }
+    if pipeline_state in {"running", "queued"}:
+        active = _pid_is_running(pid)
+        if active:
+            return {
+                "state": "running",
+                "running": True,
+                "stale": False,
+                "process_id": pid,
+                "returncode": None,
+            }
+        return {
+            "state": "unknown",
+            "running": False,
+            "stale": True,
+            "process_id": pid if isinstance(pid, int) else None,
+            "returncode": None,
+            "error": "The saved pipeline worker is no longer running; resume it to continue.",
+        }
+    return {
+        "state": pipeline_state or "not-started",
+        "running": False,
+        "stale": False,
+        "process_id": pid if isinstance(pid, int) else None,
+        "returncode": None,
+    }
 
 
 def _preflight_payload(
@@ -504,8 +627,17 @@ def _file_info(path: Path) -> dict[str, Any] | None:
     }
 
 
-def _stage_status(run_dir: Path) -> dict[str, Any]:
-    """Derive stage completion from artefacts that actually exist."""
+def _stage_status(
+    run_dir: Path,
+    *,
+    worker: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Derive stage completion from artefacts and durable worker state.
+
+    A persisted stage marked ``running`` is only live when its owning pipeline
+    process can still be observed.  This matters after a dashboard restart:
+    stale ``pipeline.json`` must become recoverable state, never a spinner.
+    """
     ingest_json = run_dir / "ingest" / "ingest.json"
     sfm_json = run_dir / "sfm" / "sfm.json"
     sparse_text = run_dir / "sfm" / "sparse_text"
@@ -596,12 +728,28 @@ def _stage_status(run_dir: Path) -> dict[str, Any]:
             if isinstance(state, str):
                 stage["pipeline_state"] = state
                 stage["state"] = state
+                stage["artifact_available"] = bool(stage.get("done"))
                 stage["running"] = state == "running"
-                stage["interrupted"] = state == "cancelled"
+                stage["interrupted"] = state in {"cancelled", "unknown"}
                 stage["failed"] = state == "failed"
+                stage["unknown"] = state == "unknown"
                 if state == "complete":
-                    stage["done"] = True
-                if state in {"failed", "cancelled"}:
+                    # A durable state record is useful evidence only when its
+                    # expected marker is still present.  Do not render a
+                    # missing output as completed after an interrupted save.
+                    if stage.get("done"):
+                        stage["done"] = True
+                    else:
+                        stage["invalid"] = True
+                        stage["error"] = record.get("error") or (
+                            "Stage was marked complete but its required output is missing."
+                        )
+                elif state in {"running", "failed", "cancelled", "unknown"}:
+                    # A retained file may belong to a previous attempt. It is
+                    # still downloadable as evidence, but cannot satisfy the
+                    # current stage until its durable fingerprint passes.
+                    stage["done"] = False
+                if state in {"failed", "cancelled", "unknown"}:
                     stage["error"] = record.get("error")
             for key in ("seconds", "started", "error", "outputs"):
                 if key in record:
@@ -611,7 +759,24 @@ def _stage_status(run_dir: Path) -> dict[str, Any]:
         order += tuple(name for name in ("evaluate", "view") if name not in order)
     else:
         order = ("ingest", "sfm", "train", "evaluate", "export", "package", "view")
-    done_count = sum(1 for k in order if stages[k]["done"])
+    observed_worker = worker if worker is not None else _worker_snapshot(run_dir)
+    # The pipeline record can remain ``running`` when the process is killed
+    # during a native call or final save.  Mark only the active stage as
+    # interrupted/unknown and retain all earlier completed stages.
+    if (
+        pipeline_stages
+        and observed_worker.get("state") in {"unknown", "failed"}
+        and not observed_worker.get("running")
+    ):
+        for stage_name, stage in stages.items():
+            if stage.get("pipeline_state") in {"running", "unknown"}:
+                stage["running"] = False
+                stage["interrupted"] = True
+                stage["unknown"] = observed_worker.get("state") == "unknown"
+                stage["failed"] = observed_worker.get("state") == "failed"
+                stage["error"] = observed_worker.get("error") or stage.get("error")
+
+    done_count = sum(1 for k in order if stages[k].get("done"))
     return {
         "stages": stages,
         "progress": {"done": done_count, "total": len(order), "order": list(order)},
@@ -646,11 +811,133 @@ def _list_image_samples(run_dir: Path, limit: int = 24) -> list[dict[str, str]]:
     return samples
 
 
-def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
-    """Read-only summary of the object sidecar's output, or ``None`` if absent.
+def _object_asset_path(run_dir: Path, value: Any) -> tuple[Path, str] | None:
+    """Resolve an object asset relative to ``objects/`` without trusting it."""
+    if not isinstance(value, str) or not value or value.startswith(('/', '\\')):
+        return None
+    if '\\' in value or '..' in Path(value).parts:
+        return None
+    relative = f"objects/{value}"
+    try:
+        path = _safe_file_under_run(run_dir, relative)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return (path, relative) if path is not None else None
 
-    Count, labels and a turntable thumbnail per object — enough for a small
-    dashboard panel without the server needing to understand the sidecar.
+
+def _object_evidence_path(run_dir: Path, value: Any) -> tuple[Path, str] | None:
+    """Resolve copied source evidence, accepting object-relative or run paths."""
+    if not isinstance(value, str) or not value or value.startswith(('/', '\\')):
+        return None
+    if '\\' in value or '..' in Path(value).parts:
+        return None
+    candidates = [value]
+    if not value.startswith("objects/"):
+        candidates.insert(0, f"objects/{value}")
+    for relative in candidates:
+        try:
+            path = _safe_file_under_run(run_dir, relative)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path is not None:
+            return path, relative
+    return None
+
+
+def _object_evidence(run_dir: Path, record: dict[str, Any]) -> dict[str, Any]:
+    """Expose only copied, real evidence and its recorded identity metadata."""
+    provenance = record.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_ref(value: Any, kind: str, label: str) -> tuple[Path, str] | None:
+        resolved = _object_evidence_path(run_dir, value)
+        if resolved is None or resolved[1] in seen:
+            return resolved
+        path, relative = resolved
+        seen.add(relative)
+        refs.append({
+            "kind": kind,
+            "label": label,
+            "name": path.name,
+            "path": relative,
+            "url": f"/files/{quote(run_dir.name)}/{quote(relative, safe='/')}",
+        })
+        return resolved
+
+    for key, kind, label in (
+        ("preview_path", "source-crop", "Source crop"),
+        ("source_preview", "source-crop", "Source crop"),
+        ("source_image", "source-image", "Source frame"),
+        ("source_frame", "source-image", "Source frame"),
+        ("mask_path", "mask", "Segmentation mask"),
+        ("source_mask", "mask", "Segmentation mask"),
+    ):
+        value = record.get(key)
+        if value is None:
+            value = provenance.get(key)
+        if value is None and isinstance(provenance.get("source_record"), dict):
+            value = provenance["source_record"].get(key)
+        add_ref(value, kind, label)
+
+    source_record = provenance.get("source_record")
+    source_record = source_record if isinstance(source_record, dict) else {}
+    identity: dict[str, Any] = {}
+    for key in (
+        "frame_id", "source_frame_id", "image_id", "image_name", "camera_id",
+        "detection_id", "instance_id", "mask_id", "mask_sha256",
+    ):
+        value = record.get(key)
+        if value is None:
+            value = provenance.get(key)
+        if value is None:
+            value = source_record.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            identity[key] = value
+    observations: list[dict[str, Any]] = []
+    raw_observations = provenance.get("evidence")
+    if isinstance(raw_observations, list):
+        for raw in raw_observations:
+            if not isinstance(raw, dict):
+                continue
+            observation: dict[str, Any] = {}
+            for key in (
+                "frame_id", "source_frame_id", "image_id", "image_name", "camera_id",
+                "detection_id", "instance_id", "mask_id", "mask_sha256", "coordinate_space",
+            ):
+                value = raw.get(key)
+                if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                    observation[key] = value
+            mask = raw.get("mask_path")
+            mask_label = "Segmentation mask"
+            if raw.get("image_id") is not None:
+                mask_label += f" · image {raw['image_id']}"
+            resolved = add_ref(mask, "mask", mask_label)
+            if resolved is not None:
+                observation["mask_path"] = resolved[1]
+                observation["mask_url"] = f"/files/{quote(run_dir.name)}/{quote(resolved[1], safe='/')}"
+            if observation:
+                observations.append(observation)
+    result: dict[str, Any] = {
+        "items": refs,
+        "has_source": any(item["kind"] in {"source-crop", "source-image"} for item in refs),
+        "has_mask": any(item["kind"] == "mask" for item in refs),
+        "identity": identity,
+        "observations": observations,
+    }
+    for key in ("review_status", "derivative_class", "method"):
+        value = record.get(key, provenance.get(key))
+        if isinstance(value, str) and value:
+            result[key] = value
+    return result
+
+
+def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
+    """Read-only summary of validated object output and copied source evidence.
+
+    A source crop is labelled as evidence, never as a rendered mesh. Asset URLs
+    are emitted only for files contained by this run directory.
     """
     manifest = run_dir / "objects" / "objects.json"
     doc = _read_json(manifest)
@@ -667,53 +954,59 @@ def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
         if not isinstance(rec, dict):
             continue
         oid = rec.get("object_id")
+        safe_id = safe_component(oid)
         # A thumbnail is offered only for a safe, contained object id — never
         # build a served path from an untrusted identifier.
         thumb_url = None
-        if safe_component(oid):
-            thumb_rel = f"objects/{oid}/preview.png"
-            if not _safe_file_under_run(run_dir, thumb_rel):
-                thumb_rel = f"objects/{oid}/turntable/view_00.png"
-            candidate = (run_dir / thumb_rel).resolve()
-            if candidate.is_relative_to(run_dir.resolve()) and candidate.is_file():
-                thumb_url = f"/files/{quote(name)}/{quote(thumb_rel)}"
+        thumb_rel = None
+        if safe_id:
+            preview = _object_evidence_path(run_dir, rec.get("preview_path"))
+            if preview is None:
+                preview = _object_evidence_path(run_dir, f"{oid}/preview.png")
+            if preview is None:
+                preview = _object_evidence_path(run_dir, f"{oid}/turntable/view_00.png")
+            if preview is not None:
+                _, thumb_rel = preview
+                thumb_url = f"/files/{quote(name)}/{quote(thumb_rel, safe='/')}"
+        provenance = rec.get("provenance") if isinstance(rec.get("provenance"), dict) else {}
+        asset_type = rec.get("asset_type")
+        if not isinstance(asset_type, str):
+            asset_type = "gaussian-splat" if isinstance(rec.get("splat_path"), str) else "mesh"
+        splat = _object_asset_path(run_dir, rec.get("splat_path"))
+        mesh = _object_asset_path(run_dir, rec.get("mesh_path"))
+        evidence = _object_evidence(run_dir, rec)
         items.append({
-            "object_id": oid if safe_component(oid) else None,
+            "object_id": oid if safe_id else None,
             "label": rec.get("label") if isinstance(rec.get("label"), str) else None,
             "confidence": rec.get("confidence"),
             "coverage": rec.get("coverage"),
-            "asset_type": "gaussian-splat" if rec.get("splat_path") else "mesh",
-            "splat_url": (
-                f"/files/{quote(name)}/objects/{quote(rec['splat_path'])}"
-                if isinstance(rec.get("splat_path"), str)
-                and rec["splat_path"].lower().endswith(".splat")
-                and _safe_file_under_run(run_dir, f"objects/{rec['splat_path']}") is not None
-                else None
-            ),
+            "asset_type": asset_type,
+            "splat_url": f"/files/{quote(name)}/{quote(splat[1], safe='/')}"
+            if splat is not None and str(splat[1]).lower().endswith(".splat") else None,
             "viewer_url": (
-                f"/viewer/{quote(name)}?scene={quote('objects/' + rec['splat_path'], safe='')}&label={quote(str(rec.get('label', 'Object')))}"
-                if isinstance(rec.get("splat_path"), str)
-                and rec["splat_path"].lower().endswith(".splat")
-                and _safe_file_under_run(run_dir, f"objects/{rec['splat_path']}") is not None
+                f"/viewer/{quote(name)}?scene={quote(splat[1], safe='')}&label={quote(str(rec.get('label', 'Object')))}"
+                if splat is not None and str(splat[1]).lower().endswith(".splat")
                 else None
             ),
             "thumb_url": thumb_url,
-            "thumb_kind": "source-crop" if thumb_url and thumb_rel.endswith("/preview.png") else "render",
-            "mesh_url": (
-                f"/files/{quote(name)}/objects/{quote(rec['mesh_path'])}"
-                if isinstance(rec.get("mesh_path"), str)
-                and _safe_file_under_run(run_dir, f"objects/{rec['mesh_path']}") is not None
-                else None
-            ),
+            "thumb_kind": "source-crop" if thumb_url and thumb_rel and thumb_rel.endswith("/preview.png") else "render",
+            "mesh_url": f"/files/{quote(name)}/{quote(mesh[1], safe='/')}" if mesh is not None else None,
             "mesh_name": Path(rec["mesh_path"]).name
-            if isinstance(rec.get("mesh_path"), str) else None,
+            if mesh is not None else None,
+            "evidence": evidence,
+            "review_status": provenance.get("review_status") if isinstance(provenance.get("review_status"), str) else None,
+            "derivative_class": provenance.get("derivative_class") if isinstance(provenance.get("derivative_class"), str) else None,
         })
     summary: dict[str, Any] = {"count": len(items), "objects": items}
     # optional composed-scene glb (all objects placed in one glTF scene)
     cs = doc.get("composed_scene") if isinstance(doc, dict) else None
     if isinstance(cs, dict) and safe_component(str(cs.get("path", "")).split("/")[0]):
         rel = cs["path"]
-        if isinstance(rel, str) and _safe_file_under_run(run_dir, f"objects/{rel}") is not None:
+        try:
+            contained = isinstance(rel, str) and _safe_file_under_run(run_dir, f"objects/{rel}") is not None
+        except (OSError, RuntimeError, ValueError):
+            contained = False
+        if contained:
             summary["composed_scene"] = {
                 "url": f"/files/{quote(name)}/objects/{quote(rel)}",
                 "sha256": cs.get("sha256"),
@@ -722,8 +1015,59 @@ def _objects_summary(run_dir: Path) -> dict[str, Any] | None:
     return summary
 
 
+def _lock_is_busy(lock_root: Path, *, filename: str = "pipeline.lock") -> bool:
+    """Probe a task-owned lock without taking ownership of the work."""
+    if filename != "pipeline.lock":
+        path = Path(lock_root) / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("a+b") as handle:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    if not handle.read(1):
+                        handle.write(b"0")
+                        handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return False
+        except OSError:
+            return True
+    try:
+        from .pipeline import run_lock
+
+        with run_lock(Path(lock_root)):
+            return False
+    except RuntimeError:
+        return True
+    except OSError:
+        # A locked or inaccessible workspace is not safe to call available.
+        return True
+
+
+def _command_available(command: Any) -> bool:
+    if not isinstance(command, str) or not command.strip():
+        return False
+    value = command.strip()
+    try:
+        return Path(value).is_file() or shutil.which(value) is not None
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _object_workflow(run_dir: Path, process: subprocess.Popen | None = None) -> dict[str, Any]:
-    """Truthful UI state for the optional external object-separation stage."""
+    """Truthful UI state for the optional external object-separation stage.
+
+    ``ready`` describes usable reconstruction inputs.  ``can_start`` also
+    requires a configured executable and valid argument list, so a stale path
+    cannot be presented as a working sidecar.
+    """
     model_files = []
     for role, rel in (
         ("Gaussian master", "model/scene.ply"),
@@ -739,19 +1083,77 @@ def _object_workflow(run_dir: Path, process: subprocess.Popen | None = None) -> 
                 **info,
                 "url": f"/files/{quote(run_dir.name)}/{quote(rel)}",
             })
-    running = process is not None and process.poll() is None
+    sidecar = os.environ.get("VITRINE_OBJECT_SIDECAR", "").strip()
+    configured = bool(sidecar)
+    executable_available = _command_available(sidecar)
+    args_error = None
+    try:
+        configured_args = json.loads(os.environ.get("VITRINE_OBJECT_SIDECAR_ARGS_JSON", "[]"))
+        if not isinstance(configured_args, list) or any(not isinstance(arg, str) for arg in configured_args):
+            raise ValueError("expected a JSON array of strings")
+    except (json.JSONDecodeError, ValueError) as exc:
+        configured_args = []
+        args_error = str(exc)
+    process_code = process.poll() if process is not None else None
+    lock_busy = process is None and _lock_is_busy(run_dir / "object-worker")
+    outputs = _objects_summary(run_dir)
+    staging = sorted(
+        p for p in run_dir.glob(".objects.staging-*")
+        if p.is_dir() and not p.is_symlink()
+    )
+    if process is not None and process_code is None:
+        worker_state = "running"
+    elif lock_busy:
+        # A server restart loses its Popen handle, but the CLI's task lock is
+        # still a reliable liveness signal while the sidecar is alive.
+        worker_state = "running"
+    elif process is not None and process_code:
+        worker_state = "failed"
+    elif process is not None and process_code == 0 and outputs is None:
+        worker_state = "unknown"
+    elif outputs is not None:
+        worker_state = "complete"
+    elif staging:
+        worker_state = "unknown"
+    else:
+        worker_state = "idle"
+    missing: list[str] = []
+    if not any(item["role"] == "Gaussian master" for item in model_files):
+        missing.append("model/scene.ply")
+    if not (run_dir / "sfm" / "sparse_text" / "images.txt").is_file():
+        missing.append("registered camera poses")
+    if not (run_dir / "ingest" / "images").is_dir():
+        missing.append("ingest/images")
+    configuration_error = None
+    if configured and not executable_available:
+        configuration_error = f"Object sidecar executable is not available: {sidecar}"
+    elif args_error:
+        configuration_error = f"Invalid sidecar argument configuration: {args_error}"
     return {
-        "configured": bool(os.environ.get("VITRINE_OBJECT_SIDECAR")),
+        "configured": configured,
+        "executable": sidecar or None,
+        "executable_available": executable_available if configured else False,
+        "configuration_error": configuration_error,
+        "argument_count": len(configured_args),
         "ready": bool(model_files),
-        "running": running,
-        "returncode": None if process is None or running else process.returncode,
+        "source_ready": not missing,
+        "missing_inputs": missing,
+        "running": worker_state == "running",
+        "state": worker_state,
+        "returncode": None if process is None or process_code is None else process_code,
+        "stale": worker_state in {"unknown", "failed"},
+        "recovery_required": worker_state in {"unknown", "failed"},
         "inputs": model_files,
-        "outputs": _objects_summary(run_dir),
+        "outputs": outputs,
+        "staging": [str(p.relative_to(run_dir)) for p in staging],
         "log_url": f"/api/runs/{quote(run_dir.name)}/log?which=objects",
     }
 
 
-def _summarise_run(run_dir: Path) -> dict[str, Any]:
+def _summarise_run(
+    run_dir: Path,
+    process: subprocess.Popen | None = None,
+) -> dict[str, Any]:
     name = run_dir.name
     samples = _list_image_samples(run_dir, limit=1)
     # A reviewed registered viewpoint also provides an intentional library cover.
@@ -778,8 +1180,27 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
     if hero and model_path.is_file() and hero_record.get("source_mtime_ns") == model_path.stat().st_mtime_ns:
         samples = [{"name": "Splat preview", "kind": "splat-render",
                     "url": f"/files/{quote(name)}/model/library-hero.jpg?v={hero.stat().st_mtime_ns}"}]
-    status = _stage_status(run_dir)
     pipeline = _pipeline_record(run_dir)
+    worker = _worker_snapshot(run_dir, process)
+    status = _stage_status(run_dir, worker=worker)
+    # A malformed or manually edited record can say that the pipeline exited
+    # successfully while one of its required stage markers has disappeared.
+    # Treat that contradiction as a failed/recoverable run so the UI cannot
+    # present a stale directory as a successful build.
+    invalid_stages = [
+        name for name, stage in status["stages"].items() if stage.get("invalid")
+    ]
+    if worker.get("state") in {"complete", "completed"} and invalid_stages:
+        worker = dict(
+            worker,
+            state="failed",
+            stale=True,
+            error=(
+                "Pipeline reported completion but required output is missing: "
+                + ", ".join(invalid_stages)
+            ),
+        )
+        status = _stage_status(run_dir, worker=worker)
     train = status["stages"]["train"]["report"] or {}
     ingest = status["stages"]["ingest"]["report"] or {}
     sfm = status["stages"]["sfm"]["report"] or {}
@@ -812,11 +1233,15 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
     splat_created_mtime = model_info["mtime"] if model_info else None
 
     pipeline_state = pipeline.get("state") if isinstance(pipeline, dict) else None
-    pipeline_active = pipeline_state in {"running", "queued"}
+    # A running pipeline record is not enough after a dashboard restart.  The
+    # worker snapshot is the liveness authority; a fresh progress file still
+    # supports historical individual train invocations without a pipeline.
+    pipeline_active = bool(worker.get("running"))
     running = pipeline_active or status["stages"]["train"].get("running", False)
     interrupted = (
         pipeline_state in {"failed", "cancelled"}
         or status["stages"]["train"].get("interrupted", False)
+        or worker.get("state") in {"unknown", "failed"}
     ) and not running
     # progress.json (running=True, or a stale interrupted mid-run) has no
     # final_psnr/minutes/peak_vram_gb — those only exist on train.json. Fall
@@ -881,6 +1306,9 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
             "iterations": train.get("iterations"),
             "running": running,
             "interrupted": interrupted,
+            "worker_state": worker.get("state"),
+            "worker_stale": bool(worker.get("stale")),
+            "worker_error": worker.get("error"),
             "pipeline_state": pipeline_state,
             "pipeline_error": pipeline.get("error") if isinstance(pipeline, dict) else None,
             "step": train.get("step") if (running or interrupted) else None,
@@ -896,6 +1324,81 @@ def _summarise_run(run_dir: Path) -> dict[str, Any]:
         "viewer_url": f"/viewer/{name}" if artefacts["scene_splat"] else None,
         "splat_url": f"/files/{name}/model/scene.splat" if artefacts["scene_splat"] else None,
     }
+
+
+def _truthful_construction_payload(
+    run_dir: Path,
+    payload: dict[str, Any],
+    process: subprocess.Popen | None = None,
+) -> dict[str, Any]:
+    """Overlay durable worker truth on the live-construction response.
+
+    ``construction_payload`` also serves historical experiment folders and
+    predates the pipeline worker record. For a normal run, however, a clean
+    child exit is only completion when the child persisted a terminal pipeline
+    state and every required stage marker still exists. Keeping this boundary
+    in the server makes the browser truthful across dashboard restarts while
+    the construction module remains usable for legacy recordings.
+    """
+    pipeline = payload.get("pipeline")
+    if process is None and not isinstance(pipeline, dict):
+        return payload
+
+    worker = _worker_snapshot(Path(run_dir), process)
+    status = _stage_status(Path(run_dir), worker=worker)
+    invalid_stages = [
+        name for name, stage in status["stages"].items() if stage.get("invalid")
+    ]
+    if worker.get("state") in {"complete", "completed"} and invalid_stages:
+        worker = dict(
+            worker,
+            state="failed",
+            stale=True,
+            error=(
+                "Pipeline reported completion but required output is missing: "
+                + ", ".join(invalid_stages)
+            ),
+        )
+        status = _stage_status(Path(run_dir), worker=worker)
+
+    payload["state"] = worker.get("state")
+    payload["worker_state"] = worker.get("state")
+    payload["worker_stale"] = bool(worker.get("stale"))
+    payload["worker_error"] = worker.get("error")
+    payload["returncode"] = worker.get("returncode")
+    if (worker.get("state") == "running" and payload.get("stage") == "sfm"
+            and payload.get("substage") == "global_mapper"):
+        from .sfm_visual import global_mapper_progress
+        activity = global_mapper_progress(run_dir)
+        if activity:
+            payload["solver_progress"] = activity
+            payload["message"] = activity["message"]
+    if worker.get("state") in {"unknown", "failed"}:
+        payload["error"] = worker.get("error") or payload.get("error")
+        payload["can_resume"] = bool(
+            isinstance(pipeline, dict) and pipeline.get("schema")
+        )
+    elif worker.get("state") == "cancelled":
+        payload["can_resume"] = bool(
+            isinstance(pipeline, dict) and pipeline.get("schema")
+        )
+
+    done = payload.get("done")
+    if isinstance(done, dict):
+        for name, stage in status["stages"].items():
+            if name in done:
+                done[name] = bool(stage.get("done"))
+    payload["stage_states"] = {
+        name: {
+            key: stage[key]
+            for key in ("state", "pipeline_state", "done", "artifact_available",
+                        "running", "interrupted", "failed", "unknown", "invalid", "error")
+            if key in stage
+        }
+        for name, stage in status["stages"].items()
+        if isinstance(stage, dict)
+    }
+    return payload
 
 
 def _list_runs(
@@ -1015,6 +1518,7 @@ def _doctor_payload() -> dict[str, Any]:
     return {
         "ok": ok,
         "version": __version__,
+        "git": _git_identity(),
         "cuda": status,
         "gpu": gpu,
         "tier": tier,
@@ -1084,32 +1588,32 @@ class VitrineHandler(SimpleHTTPRequestHandler):
     mesh_processes: dict[str, subprocess.Popen] = {}
 
     def _with_capture_job(self, run: dict[str, Any]) -> dict[str, Any]:
-        pipeline = run.get("pipeline") or {}
         process = self.capture_processes.get(run["name"])
-        if process is not None:
-            code = process.poll()
-            job = {"running": code is None, "returncode": code, "process_id": process.pid}
-            if code is not None and code != 0:
-                if pipeline.get("state") not in {"complete", "completed", "failed", "cancelled"}:
-                    pipeline = dict(pipeline)
-                    pipeline["state"] = "failed"
-                    pipeline.setdefault("error", f"pipeline exited with code {code}")
-                    run["pipeline"] = pipeline
-                job["error"] = pipeline.get("error")
-            run["capture_job"] = job
-        elif pipeline.get("state") in {"running", "queued"}:
-            # A dashboard restart loses the in-memory Popen handle. Use the
-            # persisted PID as a hint, while explicitly exposing stale state
-            # so the UI can offer Resume rather than showing a false spinner.
-            pid = pipeline.get("pid")
-            active = _pid_is_running(pid)
-            run["capture_job"] = {
-                "running": active,
-                "returncode": None,
-                "process_id": pid if isinstance(pid, int) else None,
-                "stale": not active,
-                "error": None if active else "The saved pipeline is no longer running; resume it to continue.",
-            }
+        worker = _worker_snapshot(
+            self.runs_root / run["name"],
+            process,
+        )
+        # Keep this additive and serialisable; the persisted pipeline record is
+        # never rewritten merely because the dashboard observed a dead worker.
+        run["capture_job"] = {
+            "running": bool(worker.get("running")),
+            "returncode": worker.get("returncode"),
+            "process_id": worker.get("process_id"),
+            "state": worker.get("state"),
+            "stale": bool(worker.get("stale")),
+            "error": worker.get("error"),
+        }
+        if worker.get("state") in {"unknown", "failed"}:
+            run["capture_job"]["recovery_required"] = True
+        headline = run.setdefault("headline", {})
+        if worker.get("running"):
+            headline["running"] = True
+            headline["interrupted"] = False
+        elif worker.get("state") in {"unknown", "failed"}:
+            headline["running"] = False
+            headline["interrupted"] = True
+            headline["worker_state"] = worker.get("state")
+            headline["worker_error"] = worker.get("error")
         return run
 
     def _visible(self, name: str) -> bool:
@@ -1186,7 +1690,7 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             return self._send_file(file_path)
 
         if path == "/api/health":
-            return self._send_json({"ok": True, "version": __version__})
+            return self._send_json({"ok": True, "version": __version__, "git": _git_identity()})
 
         if path == "/api/doctor":
             try:
@@ -1223,8 +1727,17 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             return self._send_json(report)
 
         if path == "/api/construction":
-            from .live_build import activity
-            return self._send_json({"jobs": [j for j in activity(self.runs_root)["jobs"] if self._visible(j["run"])]})
+            jobs = []
+            for run_dir in self.runs_root.iterdir():
+                if not run_dir.is_dir() or run_dir.is_symlink() or not self._visible(run_dir.name):
+                    continue
+                worker = _worker_snapshot(run_dir, self.capture_processes.get(run_dir.name))
+                if worker.get("running"):
+                    record = _pipeline_record(run_dir) or {}
+                    jobs.append({"id": run_dir.name + "/model", "run": run_dir.name,
+                                 "label": "Reconstruction", "state": "running",
+                                 "updated": record.get("updated", 0)})
+            return self._send_json({"jobs": sorted(jobs, key=lambda job: job["updated"], reverse=True)})
 
         if path.startswith("/api/construction-image/"):
             from .live_build import construction_image
@@ -1260,7 +1773,7 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             if run_dir is None:
                 return self._send_json({"error": "run not found"}, status=404)
             if len(parts) == 1:
-                detail = self._with_capture_job(_summarise_run(run_dir))
+                detail = self._with_capture_job(_summarise_run(run_dir, self.capture_processes.get(name)))
                 detail["object_workflow"] = _object_workflow(
                     run_dir, self.object_processes.get(name)
                 )
@@ -1270,7 +1783,7 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                 # Include full reports for the detail pane (already in stages).
                 return self._send_json(detail)
             if len(parts) == 2 and parts[1] == "summary":
-                return self._send_json(self._with_capture_job(_summarise_run(run_dir)))
+                return self._send_json(self._with_capture_job(_summarise_run(run_dir, self.capture_processes.get(name))))
             if len(parts) == 2 and parts[1] == "preflight":
                 query = parse_qs(parsed.query)
                 full = (query.get("full") or ["0"])[0].lower() in {"1", "true", "yes", "full"}
@@ -1289,8 +1802,14 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                             or not folder.resolve().is_relative_to(run_dir.resolve())
                             or folder.resolve().parent != (run_dir / "experiments").resolve()):
                         return self._send_json({"error": "experiment not found"}, status=404)
-                return self._send_json(construction_payload(
-                    run_dir, None if folder else self.capture_processes.get(name), folder))
+                construction = construction_payload(
+                    run_dir, None if folder else self.capture_processes.get(name), folder
+                )
+                if folder is None:
+                    construction = _truthful_construction_payload(
+                        run_dir, construction, self.capture_processes.get(name)
+                    )
+                return self._send_json(construction)
             if len(parts) == 2 and parts[1] == "log":
                 qs = parse_qs(parsed.query)
                 which = (qs.get("which") or ["train"])[0]
@@ -1328,6 +1847,9 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             if len(parts) == 2 and parts[1] == "objects":
                 process = self.object_processes.get(name)
                 return self._send_json(_object_workflow(run_dir, process))
+            if len(parts) == 2 and parts[1] == "object-meshes":
+                from .object_mesh import mesh_summary
+                return self._send_json(mesh_summary(run_dir, self.mesh_processes.get(name)))
             return self._send_json({"error": "unknown endpoint"}, status=404)
 
         if path.startswith("/files/"):
@@ -1476,6 +1998,24 @@ class VitrineHandler(SimpleHTTPRequestHandler):
             run_dir = _safe_run_dir(self.runs_root, name) if self._visible(name) else None
             if run_dir is None:
                 return self._send_json({"error": "run not found"}, status=404)
+            selected_object = None
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length > 4096:
+                    raise ValueError("Expected a small JSON request")
+                if length:
+                    if self.headers.get_content_type() != "application/json":
+                        raise ValueError("JSON request required")
+                    body = json.loads(self.rfile.read(length))
+                    if not isinstance(body, dict):
+                        raise ValueError("Expected a JSON object")
+                    selected_object = body.get("object_id")
+                    if selected_object is not None:
+                        from .objects import safe_component
+                        if not safe_component(selected_object):
+                            raise ValueError("object_id must be a safe object identifier")
+            except (ValueError, json.JSONDecodeError) as exc:
+                return self._send_json({"error": str(exc)}, status=400)
             with self.object_lock:
                 if any(p is not None and p.poll() is None for p in
                        (self.object_processes.get(name), self.mesh_processes.get(name), self.capture_processes.get(name))):
@@ -1484,17 +2024,30 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                     return self._send_json({"error": "Separate objects before creating meshes"}, status=409)
                 if not (run_dir / "sfm" / "sparse_text" / "images.txt").is_file():
                     return self._send_json({"error": "Registered source cameras are required"}, status=409)
+                object_summary = _objects_summary(run_dir) or {}
+                object_items = object_summary.get("objects") if isinstance(object_summary, dict) else []
+                object_ids = {
+                    item.get("object_id") for item in object_items
+                    if isinstance(item, dict) and item.get("object_id")
+                }
+                if selected_object is not None and selected_object not in object_ids:
+                    return self._send_json({"error": f"Object {selected_object!r} is not present in the validated separation output"}, status=409)
+                if _lock_is_busy(run_dir / "object-meshes", filename="job.lock"):
+                    return self._send_json({"error": "Surface reconstruction is already running"}, status=409)
                 logs = run_dir / "logs"
                 logs.mkdir(exist_ok=True)
                 try:
+                    command = [sys.executable, "-m", "vitrine", "--run-dir", str(run_dir), "object-meshes"]
+                    if selected_object is not None:
+                        command.extend(["--object-id", selected_object])
                     with (logs / "object-meshes.log").open("ab") as log:
                         self.mesh_processes[name] = subprocess.Popen(
-                            [sys.executable, "-m", "vitrine", "--run-dir", str(run_dir), "object-meshes"],
+                            command,
                             cwd=self.project_root, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0)
                 except OSError as exc:
                     return self._send_json({"error": str(exc)}, status=500)
-            return self._send_json({"ok": True}, status=202)
+            return self._send_json({"ok": True, "object_id": selected_object, "process_id": self.mesh_processes[name].pid}, status=202)
         if path.startswith("/api/runs/") and path.endswith("/objects"):
             name = path[len("/api/runs/") : -len("/objects")].strip("/")
             if not self._visible(name):
@@ -1512,9 +2065,12 @@ class VitrineHandler(SimpleHTTPRequestHandler):
                 return self._send_json({
                     "error": "Object sidecar is not configured. Set VITRINE_OBJECT_SIDECAR before starting the dashboard."
                 }, status=409)
-            if not workflow["ready"]:
+            if workflow.get("configuration_error"):
+                return self._send_json({"error": workflow["configuration_error"]}, status=409)
+            if not workflow.get("source_ready"):
                 return self._send_json({
-                    "error": "No 3D model output found. Train or export this run first."
+                    "error": "Object separation inputs are incomplete: "
+                    + ", ".join(workflow.get("missing_inputs") or ["build the scene first"])
                 }, status=409)
             logs_dir = run_dir / "logs"
             logs_dir.mkdir(parents=True, exist_ok=True)
@@ -1711,15 +2267,23 @@ def serve(
     open_browser: bool = False,
     on_ready=None,
     project_root: Path | None = None,
+    runs_root: Path | None = None,
     only: list[str] | set[str] | None = None,
 ) -> None:
     """Start the dashboard and block until interrupted.
 
     *only* — optional run directory names to show. Other folders under
     ``runs/`` remain on disk but are hidden from the library and detail APIs.
+    ``runs_root`` — optional external run directory. UI assets and subprocess
+    working directory still come from ``project_root``; this is useful when
+    captures live on a separate Windows data volume.
     """
     root = (project_root or PROJECT_ROOT).resolve()
-    runs_root = root / "runs"
+    runs_root = (Path(runs_root).expanduser().resolve() if runs_root is not None
+                 else root / "runs")
+    if runs_root.exists() and not runs_root.is_dir():
+        raise NotADirectoryError(f"Dashboard runs root is not a directory: {runs_root}")
+    runs_root.mkdir(parents=True, exist_ok=True)
     ui_dir = Path(__file__).resolve().parent / "ui"
     if not (ui_dir / "index.html").is_file():
         raise FileNotFoundError(f"UI assets missing under {ui_dir}")
